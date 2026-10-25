@@ -68,6 +68,9 @@ struct FakeGit: GitClient {
     var ignored: [String: [String]] = [:]
 
     func hasTrackedFiles(in folder: URL, repository: URL) -> Bool? { tracked.contains(folder.fsPath) }
+    func trackedFolders(among folders: [URL], repository: URL) -> Set<String>? {
+        Set(folders.map(\.fsPath)).intersection(tracked)
+    }
     func ignoredDirectories(in repository: URL) -> [String]? { ignored[repository.fsPath] ?? [] }
 }
 
@@ -80,6 +83,11 @@ final class FailingGit: GitClient {
         return nil
     }
 
+    func trackedFolders(among folders: [URL], repository: URL) -> Set<String>? {
+        calls += 1
+        return nil
+    }
+
     func ignoredDirectories(in repository: URL) -> [String]? { nil }
 }
 
@@ -87,4 +95,17 @@ final class FailingGit: GitClient {
 struct FakeIndex: ExclusionIndex {
     var items: [URL]
     func excludedItems() -> [URL]? { items }
+}
+
+/// Git stand-in that counts the grouped queries; folders listed in `tracked` contain tracked files.
+final class CountingGit: GitClient {
+    var tracked: Set<String> = []
+    var groupedCalls = 0
+
+    func hasTrackedFiles(in folder: URL, repository: URL) -> Bool? { tracked.contains(folder.fsPath) }
+    func trackedFolders(among folders: [URL], repository: URL) -> Set<String>? {
+        groupedCalls += 1
+        return Set(folders.map(\.fsPath)).intersection(tracked)
+    }
+    func ignoredDirectories(in repository: URL) -> [String]? { [] }
 }

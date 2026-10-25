@@ -83,7 +83,9 @@ func makeScanner(_ config: Config, quiet: Bool) -> FolderScanner {
         Log.scan.notice("git not found: the tracked-files safety check is disabled")
         if !quiet { printError("warning: git not found, the tracked-files safety check is disabled") }
     }
-    return FolderScanner(config: config, git: git, index: SpotlightIndex(), previous: ScanLocations.load())
+    return FolderScanner(
+        config: config, git: git, index: SpotlightIndex(), previous: ScanLocations.load(), verified: VerifiedRepositories.load()
+    )
 }
 
 func ruleLabel(_ ruleID: String) -> String {
@@ -154,6 +156,9 @@ func scan(_ options: Options) -> Int32 {
         do { try LastScan(report).save() } catch { printError("cannot save the scan summary: \(error.localizedDescription)") }
         do { try scanner.locations(after: report).save() } catch {
             printError("cannot save the scanned locations: \(error.localizedDescription)")
+        }
+        do { try scanner.verifiedRepositories(after: report).save() } catch {
+            printError("cannot save the checked repositories: \(error.localizedDescription)")
         }
     }
 

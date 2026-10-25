@@ -296,6 +296,70 @@ import Testing
         #expect(store.excludedPaths.isEmpty)
     }
 
+    /// A repository whose git index is the file `projects/app/.git/index`.
+    private func gradleRepository() throws -> (build: URL, index: URL) {
+        try sandbox.file("projects/app/build.gradle", "")
+        let index = try sandbox.file("projects/app/.git/index", "first")
+        return (try sandbox.folder("projects/app/build"), index)
+    }
+
+    /// One applied scan that starts from what the previous one found clean.
+    private func rescan(git: any GitClient, verified: inout VerifiedRepositories) -> ScanReport {
+        let scanner = FolderScanner(config: sandbox.config(), store: store, git: git, verified: verified)
+        let report = scanner.scan(apply: true)
+        verified = scanner.verifiedRepositories(after: report)
+        return report
+    }
+
+    @Test func removesOwnExclusionWhenItsFilesAreCommittedLater() throws {
+        let (build, index) = try gradleRepository()
+        let git = CountingGit()
+        var verified = VerifiedRepositories()
+        #expect(rescan(git: git, verified: &verified).excluded.map(\.url.fsPath) == [build.fsPath])
+        #expect(rescan(git: git, verified: &verified).kept.map(\.url.fsPath) == [build.fsPath])
+        #expect(verified.indexes.keys.contains(sandbox.url("projects/app").fsPath))
+
+        // `git add build && git commit` rewrites the index.
+        git.tracked = [build.fsPath]
+        try FileManager.default.removeItem(at: index)
+        try sandbox.file("projects/app/.git/index", "second")
+        let report = rescan(git: git, verified: &verified)
+
+        #expect(report.removed.map(\.reason) == ["now contains files tracked by git"])
+        #expect(report.kept.isEmpty)
+        #expect(store.excludedPaths.isEmpty)
+    }
+
+    @Test func asksGitAgainOnlyWhenTheIndexChanged() throws {
+        let (build, _) = try gradleRepository()
+        try sandbox.file("projects/app/package.json", "{}")
+        try sandbox.folder("projects/app/node_modules")
+        let git = CountingGit()
+        var verified = VerifiedRepositories()
+        _ = rescan(git: git, verified: &verified)
+        _ = rescan(git: git, verified: &verified)
+        #expect(git.groupedCalls == 1, "one query for both exclusions of the repository")
+
+        _ = rescan(git: git, verified: &verified)
+        _ = rescan(git: git, verified: &verified)
+
+        #expect(git.groupedCalls == 1)
+        #expect(store.isExcluded(build))
+    }
+
+    @Test func rechecksARepositoryGitCouldNotAnswerFor() throws {
+        let (build, _) = try gradleRepository()
+        var verified = VerifiedRepositories()
+        _ = rescan(git: CountingGit(), verified: &verified)
+        let failing = FailingGit()
+
+        let report = rescan(git: failing, verified: &verified)
+
+        #expect(failing.calls == 1)
+        #expect(report.kept.map(\.url.fsPath) == [build.fsPath])
+        #expect(verified.indexes.isEmpty, "a repository git could not check must be asked again next time")
+    }
+
     @Test func listAndResetTouchOnlyOwnExclusions() throws {
         try sandbox.file("projects/web/package.json", "{}")
         let modules = try sandbox.folder("projects/web/node_modules")

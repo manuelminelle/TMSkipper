@@ -25,6 +25,8 @@ public struct ScanReport: Sendable {
     public var duration: TimeInterval = 0
     /// Former roots and guarded paths where an exclusion could not be removed: kept for the next scan.
     var unfinishedLocations = ScanLocations()
+    /// Repositories whose TMSkipper exclusions were found free of tracked files, with their index state.
+    var verifiedRepositories = VerifiedRepositories()
 }
 
 /// Walks the roots, applies the rules and keeps the guarded paths excluded.
@@ -41,15 +43,19 @@ public struct FolderScanner {
     /// Roots and guarded paths of an earlier scan that the config no longer lists.
     public let formerRoots: [URL]
     public let formerGuardedPaths: [URL]
+    /// Repositories found clean by the last applied scan, with the state of their index then.
+    public let verifiedRepositories: VerifiedRepositories
     /// Total time the git checks of one scan may take. Past it, the remaining candidates inside
     /// repositories are skipped, so the agent's scan ends before its 15-minute limit.
     public var gitTimeBudget: TimeInterval = 5 * 60
 
-    /// `previous` is what the last applied scan covered (see `locations(after:)`).
+    /// `previous` is what the last applied scan covered (see `locations(after:)`), `verified` what
+    /// it found clean (see `verifiedRepositories(after:)`).
     public init(
         config: Config, store: any ExclusionStore = SystemExclusionStore(), git: (any GitClient)?,
-        index: (any ExclusionIndex)? = nil, previous: ScanLocations? = nil
+        index: (any ExclusionIndex)? = nil, previous: ScanLocations? = nil, verified: VerifiedRepositories? = nil
     ) {
+        verifiedRepositories = verified ?? VerifiedRepositories()
         self.config = config
         self.store = store
         self.git = git
@@ -71,6 +77,11 @@ public struct FolderScanner {
         return locations
     }
 
+    /// What to save after an applied scan: the repositories whose exclusions hold no tracked files.
+    public func verifiedRepositories(after report: ScanReport) -> VerifiedRepositories {
+        report.verifiedRepositories
+    }
+
     /// Applies the rules (or only reports, when `apply` is false).
     public func scan(apply: Bool) -> ScanReport {
         let start = Date()
@@ -82,12 +93,13 @@ public struct FolderScanner {
                 onCandidate: { url, ruleID, repository, report in
                     handleCandidate(url, ruleID: ruleID, repository: repository, checks: checks, apply: apply, report: &report)
                 },
-                onExcluded: { url, report in
+                onExcluded: { url, repository, report in
                     guard let marker = store.marker(of: url) else { return }
-                    reconcile(url, marker: marker, apply: apply, report: &report)
+                    reconcile(url, marker: marker, repository: repository, checks: checks, apply: apply, report: &report)
                 }
             )
         }
+        recheckTrackedFiles(checks: checks, apply: apply, report: &report)
         guardPaths(apply: apply, report: &report)
         removeOrphans(apply: apply, report: &report)
         report.duration = Date().timeIntervalSince(start)
@@ -98,7 +110,7 @@ public struct FolderScanner {
     public func findOwned() -> ScanReport {
         let start = Date()
         var report = ScanReport(applied: false)
-        let collect: (URL, inout ScanReport) -> Void = { url, report in
+        let collect: (URL, URL?, inout ScanReport) -> Void = { url, _, report in
             if let marker = store.marker(of: url), store.isExcluded(url) {
                 report.kept.append(.init(url: url, ruleID: marker))
             }
@@ -106,12 +118,12 @@ public struct FolderScanner {
         for root in config.roots {
             traverse(
                 root: root, report: &report,
-                onCandidate: { url, _, _, report in collect(url, &report) },
+                onCandidate: { url, _, repository, report in collect(url, repository, &report) },
                 onExcluded: collect
             )
         }
         for url in config.guardedPaths where !report.kept.contains(where: { $0.url.fsPath == url.fsPath }) {
-            collect(url, &report)
+            collect(url, nil, &report)
         }
         for orphan in orphans(report: &report) where !report.kept.contains(where: { $0.url.fsPath == orphan.item.url.fsPath }) {
             report.kept.append(.init(url: orphan.item.url, ruleID: orphan.item.ruleID))
@@ -153,7 +165,7 @@ public struct FolderScanner {
         for root in config.roots {
             traverse(
                 root: root, report: &report,
-                onCandidate: { _, _, _, _ in }, onExcluded: { _, _ in },
+                onCandidate: { _, _, _, _ in }, onExcluded: { _, _, _ in },
                 onDirectory: { directory, names in
                     if names.contains(".git") { repositories.append(directory) }
                 }
@@ -196,7 +208,7 @@ public struct FolderScanner {
         report: inout ScanReport,
         skipping: [URL] = [],
         onCandidate: (URL, String, URL?, inout ScanReport) -> Void,
-        onExcluded: (URL, inout ScanReport) -> Void,
+        onExcluded: (URL, URL?, inout ScanReport) -> Void,
         onDirectory: (URL, Set<String>) -> Void = { _, _ in }
     ) {
         guard let info = FileSystem.info(root), info.isDirectory else {
@@ -245,7 +257,7 @@ public struct FolderScanner {
                 let path = entry.url.fsPath
                 if handled.contains(path) { continue }
                 if store.isExcluded(entry.url) {
-                    onExcluded(entry.url, &report)
+                    onExcluded(entry.url, repository, &report)
                     continue
                 }
                 guard let info = FileSystem.info(entry.url), info.isDirectory, !info.isDataless else { continue }
@@ -267,7 +279,7 @@ public struct FolderScanner {
         let item = ScanReport.Item(url: candidate, ruleID: ruleID)
         if store.isExcluded(candidate) {
             if let marker = store.marker(of: candidate) {
-                revalidateOwned(candidate, marker: marker, apply: apply, report: &report)
+                revalidateOwned(candidate, marker: marker, repository: repository, checks: checks, apply: apply, report: &report)
             } else {
                 report.excludedByOthers.append(item)
             }
@@ -291,7 +303,9 @@ public struct FolderScanner {
     }
 
     /// An excluded folder carrying TMSkipper's marker that no rule matched at its position.
-    private func reconcile(_ url: URL, marker: String, apply: Bool, report: inout ScanReport) {
+    private func reconcile(
+        _ url: URL, marker: String, repository: URL?, checks: GitChecks, apply: Bool, report: inout ScanReport
+    ) {
         if marker == Rule.guardedMarker {
             // Guarded paths inside a root are handled by guardPaths.
             if config.guardedPaths.contains(where: { $0.fsPath == url.fsPath }) { return }
@@ -299,21 +313,26 @@ public struct FolderScanner {
             return
         }
         if stillMatches(url, ruleID: marker) {
-            revalidateOwned(url, marker: marker, apply: apply, report: &report)
+            revalidateOwned(url, marker: marker, repository: repository, checks: checks, apply: apply, report: &report)
         } else {
             remove(url, ruleID: marker, reason: "rule \(marker) no longer applies", apply: apply, report: &report)
         }
     }
 
     /// Keeps an existing TMSkipper exclusion, unless the folder became protected or holds a protected item.
-    private func revalidateOwned(_ url: URL, marker: String, apply: Bool, report: inout ScanReport) {
+    /// One inside a repository is also queued for `recheckTrackedFiles`.
+    private func revalidateOwned(
+        _ url: URL, marker: String, repository: URL? = nil, checks: GitChecks? = nil, apply: Bool, report: inout ScanReport
+    ) {
         if config.isProtected(url) {
             remove(url, ruleID: marker, reason: "in protectedPaths", apply: apply, report: &report)
         } else if let info = FileSystem.info(url), info.isDirectory, !info.isDataless,
                   let item = RuleMatcher.protectedItem(in: url) {
             remove(url, ruleID: marker, reason: "now contains \(item)", apply: apply, report: &report)
         } else {
-            report.kept.append(.init(url: url, ruleID: marker))
+            let item = ScanReport.Item(url: url, ruleID: marker)
+            report.kept.append(item)
+            if let repository, let checks { checks.queue(item, in: repository) }
         }
     }
 
@@ -356,6 +375,8 @@ public struct FolderScanner {
         if let repository, let git {
             if checks.failedRepositories.contains(repository.fsPath) { return "git could not check for tracked files" }
             if checks.elapsed >= gitTimeBudget { return "time limit for git checks reached in this scan" }
+            // Taken before git answers: a commit made meanwhile changes it, so the next scan asks again.
+            _ = checks.indexState(of: repository)
             let start = Date()
             let tracked = git.hasTrackedFiles(in: candidate, repository: repository)
             checks.elapsed += Date().timeIntervalSince(start)
@@ -368,6 +389,38 @@ public struct FolderScanner {
             }
         }
         return nil
+    }
+
+    /// Exclusions are checked for tracked files when they are made. Files committed into one later
+    /// would leave the backups without their working copy, so the exclusions of each repository are
+    /// checked again, with one git call, whenever its index changed since the last scan found them clean.
+    private func recheckTrackedFiles(checks: GitChecks, apply: Bool, report: inout ScanReport) {
+        guard let git else { return }
+        for (repository, items) in checks.queued {
+            let path = repository.fsPath
+            let state = checks.indexState(of: repository)
+            if let state, verifiedRepositories.indexes[path] == state {
+                report.verifiedRepositories.indexes[path] = state
+                continue
+            }
+            if checks.failedRepositories.contains(path) || checks.elapsed >= gitTimeBudget { continue }
+            let start = Date()
+            let tracked = git.trackedFolders(among: items.map(\.url), repository: repository)
+            checks.elapsed += Date().timeIntervalSince(start)
+            guard let tracked else {
+                checks.failedRepositories.insert(path)
+                continue
+            }
+            var clean = true
+            for item in items where tracked.contains(item.url.fsPath) {
+                if remove(item.url, ruleID: item.ruleID, reason: "now contains files tracked by git", apply: apply, report: &report) {
+                    report.kept.removeAll { $0.url.fsPath == item.url.fsPath }
+                } else {
+                    clean = false
+                }
+            }
+            if clean, let state { report.verifiedRepositories.indexes[path] = state }
+        }
     }
 
     // MARK: - Orphans
@@ -416,7 +469,7 @@ public struct FolderScanner {
             traverse(
                 root: root, report: &report, skipping: config.roots,
                 onCandidate: { url, _, _, _ in add(url, reason: reason, formerRoot: root.fsPath) },
-                onExcluded: { url, _ in add(url, reason: reason, formerRoot: root.fsPath) }
+                onExcluded: { url, _, _ in add(url, reason: reason, formerRoot: root.fsPath) }
             )
             // Part of it could not be read: look again next time.
             if report.errors.count > errors { report.unfinishedLocations.roots.append(root.fsPath) }
@@ -491,4 +544,27 @@ public struct FolderScanner {
 private final class GitChecks {
     var failedRepositories = Set<String>()
     var elapsed: TimeInterval = 0
+    /// TMSkipper exclusions kept by this scan, by repository, in the order they were found.
+    private(set) var queued: [(repository: URL, items: [ScanReport.Item])] = []
+    private var queuedIndex: [String: Int] = [:]
+    /// Index states, taken the first time a repository is checked in this scan.
+    private var indexStates: [String: GitIndexState?] = [:]
+
+    func queue(_ item: ScanReport.Item, in repository: URL) {
+        let path = repository.fsPath
+        if let position = queuedIndex[path] {
+            queued[position].items.append(item)
+        } else {
+            queuedIndex[path] = queued.count
+            queued.append((repository, [item]))
+        }
+    }
+
+    func indexState(of repository: URL) -> GitIndexState? {
+        let path = repository.fsPath
+        if let state = indexStates[path] { return state }
+        let state = GitIndexState(repository: repository)
+        indexStates[path] = state
+        return state
+    }
 }

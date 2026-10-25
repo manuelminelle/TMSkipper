@@ -26,6 +26,11 @@ Fixes from a second review:
 - `status` replaces control characters in saved errors; bidirectional overrides are replaced in all output.
 - `protectedPaths` also match candidates under a root reached through a symbolic link.
 
+Fixes from a review of the accepted risks:
+
+- Exclusions are written through a descriptor that never follows symbolic links. Before, a folder replaced by a link during a scan could leave an exclusion on the link's target that `list` and `reset` cannot see, and removing one could clear an exclusion made by someone else.
+- Files committed into an already excluded folder are now noticed: the next scan removes its exclusion. git is asked once per repository, and only when its index changed since the last scan (`repositories.json` in the support folder).
+
 Other changes:
 
 - A dry run's summary now says "to exclude" and "to remove" instead of "excluded" and "removed".

@@ -39,6 +39,7 @@ Two caveats found while testing, both handled in `SystemExclusionStore`:
 
 - Reading back through `resourceValues(forKeys:)` right after a change can return a cached value. The exclusion state is read from the attribute itself.
 - The Foundation setter is not reliable across threads: with 8 threads setting and clearing exclusions, 10 clears out of 1,600 had no effect; on a single thread 0 out of 700. TMSkipper is single-threaded, verifies the attribute after every write and clears it directly if needed. The tests that touch real attributes run serialized.
+- The Foundation setter takes a path and follows a symbolic link at its end (verified), while the rest of TMSkipper never follows one. Every write therefore opens the item first (`O_NOFOLLOW`, which refuses a link), writes the marker and verifies the exclusion through that descriptor, and hands the setter the item's current path from `fcntl(F_GETPATH)`, taken right before the call (D12).
 
 ## D4. Item-bound ("sticky") exclusions, not fixed-path ones
 
@@ -90,7 +91,7 @@ Private keys are often saved under custom names (`vps-root`, `deploy`), so name 
 
 Credential stores are always protected and cannot be unprotected from the config: `~/.ssh`, `~/.gnupg`, `~/.aws`, `~/.azure`, `~/.kube`, `~/.docker`, `~/.config/gcloud`, `~/.password-store`, `~/.netrc`, `~/Library/Keychains`. A folder that contains one of them (for example `~/.config`) cannot be excluded either.
 
-On top of the automatic checks, `protectedPaths` in the config lists folders that are never excluded, together with their contents, such as a release package kept next to its build tree. An existing TMSkipper exclusion inside a newly protected path, or one that now contains a secret, is removed at the next scan.
+On top of the automatic checks, `protectedPaths` in the config lists folders that are never excluded, together with their contents, such as a release package kept next to its build tree. An existing TMSkipper exclusion inside a newly protected path, or one that now contains a secret, is removed at the next scan. So is one into which files were committed later, checked again with one git call per repository whenever the repository's index changed (D12).
 
 ### Why "ignored by git" is not a rule
 
@@ -115,7 +116,7 @@ TMSkipper re-checks a short list of guarded paths at every scan and re-excludes 
 ## D10. Logging and status
 
 - Changes and errors go to the unified log (`os_log`, subsystem `io.github.manuelminelle.tmskipper`): no log file to rotate.
-- The last scan's summary is written to `~/Library/Application Support/TMSkipper/last-scan.json` and shown by `tmskipper status`. `locations.json` next to it holds the roots and guarded paths of that scan (D8).
+- The last scan's summary is written to `~/Library/Application Support/TMSkipper/last-scan.json` and shown by `tmskipper status`. `locations.json` next to it holds the roots and guarded paths of that scan (D8), `repositories.json` the state of the git index of each repository whose exclusions that scan found free of tracked files (D12).
 - No notifications: a command-line binary has no app bundle, and the log plus `status` are enough.
 
 ## D11. English, open-source-ready, private until proven
@@ -155,12 +156,19 @@ A second review, on the fixed code, found and fixed, again each with a regressio
 | `status` printed saved scan errors, which hold untrusted file names, without replacing control characters; bidirectional overrides were never replaced | Low | Control and format characters (except the emoji joiner) become "?" everywhere |
 | Under a root reached through a symbolic link, a protected path written with the real location did not match | Low | Candidates are compared by their real location too |
 
+A review of the accepted risks listed below found and fixed two more, each with a regression test that fails without the fix:
+
+| Finding | Severity | Fix |
+|---|---|---|
+| The Foundation setter follows a symbolic link at the end of the path (verified). A folder replaced by a link to another folder between the checks and the write left the marker on the link and the exclusion on its target, where `list` and `reset` cannot see it; removing an exclusion through the link cleared the target's own exclusion, made by someone else (both verified) | Low | Writes go through a descriptor opened with `O_NOFOLLOW`: a link is refused, the marker is written and the result verified on the opened item, and the setter gets the item's current path from `F_GETPATH`, so a folder renamed meanwhile is still the one written. Only something put in its place in the instant between `F_GETPATH` and the setter could still receive the write; the identity check afterwards reports it as an error naming the path |
+| A folder already excluded was never checked again for git-tracked files, so files committed into it later had no working copy in the backups (their content is in `.git`, which is backed up, but uncommitted edits to them were not) | Low | Each scan checks the kept exclusions of a repository again, with one `git ls-files` for all of them, when the repository's index (found through `.git`, a folder or a `gitdir:` file) changed since the last scan found them clean. git rewrites the index on every commit and `add`, so an unchanged index needs no git call: on `~/Developer` the first scan checked every repository in 1.6 s in total, later ones ask git only where something was staged or committed. The index state is taken before git is asked, so a commit made during the scan is caught by the next one |
+
 Accepted, documented risks:
 
 - **Top-level secret check.** Only the top level of a candidate is checked for secret names and private keys. The tracked-files check does not make up for it: secrets are usually git-ignored, and a repository nested deeper inside a candidate (a git dependency in Elixir's `deps`, for example) is not seen by the outer one.
 - **Copies Spotlight cannot see.** Copies of excluded folders inside hidden folders, or in places excluded from Spotlight or outside the home folder, are not found. The README tells how to copy without the exclusion.
-- **Committed after exclusion.** A folder already excluded is not checked again for git-tracked files: that would cost one git call per exclusion on every scan, right when the backup disk is mounted.
-- **Same-user attacker.** A process running as the user could swap a folder for a symbolic link between the check and the write. It could already change the user's backups directly, so this gives it nothing new.
+- **Same-user attacker.** A process running as the user could still put a symbolic link in place of a folder in the instant between `F_GETPATH` and the Foundation setter, which only takes a path; the check afterwards reports it, but cannot undo a write that went elsewhere. Such a process could already change the user's backups directly, so this gives it nothing new. Writing the attribute through the descriptor (`fsetxattr`) would close the gap, but means writing Apple's binary plist by hand instead of using the documented API (D2).
+- **Index rewritten without a change.** A repository whose index is not a regular file, or cannot be found, is checked again at every scan. One whose index keeps the same inode, size and modification time across a commit would not be: git always writes a new index through a rename, so this needs a tool that edits it in place.
 - **Paths in the unified log** are logged as public so that `log show` is useful; they stay on the Mac unless the user shares a system diagnostic report.
 
 ## Verification status

@@ -32,6 +32,105 @@ import Testing
         #expect(!store.isExcluded(folder))
     }
 
+    @Test func neverWritesThroughASymbolicLink() throws {
+        let sandbox = try Sandbox()
+        let target = try sandbox.folder("Documents")
+        let link = sandbox.url("projects/web/node_modules")
+        try sandbox.folder("projects/web")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: target)
+        let store = SystemExclusionStore()
+
+        #expect(throws: (any Error).self) { try store.exclude(link, marker: "node-modules") }
+        #expect(!store.isExcluded(target), "the exclusion went to the link's target")
+        #expect(store.marker(of: link) == nil)
+
+        // An exclusion made by someone else on the target survives an include through the link.
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        var targetURL = target
+        try targetURL.setResourceValues(values)
+        #expect(throws: (any Error).self) { try store.include(link) }
+        #expect(store.isExcluded(target), "the exclusion of the link's target was removed")
+    }
+
+    @Test func writesToTheFolderEvenIfItIsRenamedMidWrite() throws {
+        let sandbox = try Sandbox()
+        let folder = try sandbox.folder("projects/app/build")
+        let moved = sandbox.url("projects/app/build-moved")
+        let victim = try sandbox.folder("Documents")
+        var store = SystemExclusionStore()
+        store.willSetExclusion = {
+            try? FileManager.default.moveItem(at: folder, to: moved)
+            try? FileManager.default.createSymbolicLink(at: folder, withDestinationURL: victim)
+        }
+
+        try store.exclude(folder, marker: "gradle-build")
+
+        #expect(!store.isExcluded(victim), "the exclusion went to the folder put in its place")
+        #expect(store.isExcluded(moved))
+        #expect(store.marker(of: moved) == "gradle-build")
+    }
+
+    @Test func refusesAFolderReplacedMidWrite() throws {
+        let sandbox = try Sandbox()
+        let folder = try sandbox.folder("projects/app/build")
+        let victim = try sandbox.folder("Documents")
+        var store = SystemExclusionStore()
+        store.willSetExclusion = {
+            try? FileManager.default.removeItem(at: folder)
+            try? FileManager.default.createSymbolicLink(at: folder, withDestinationURL: victim)
+        }
+
+        #expect(throws: (any Error).self) { try store.exclude(folder, marker: "gradle-build") }
+        #expect(!store.isExcluded(victim), "the exclusion went to the folder put in its place")
+    }
+
+    @Test(.enabled(if: Git.locate() != nil))
+    func gitTrackedFoldersInOneQuery() throws {
+        let sandbox = try Sandbox()
+        let repository = try sandbox.folder("repo")
+        try sandbox.file("repo/build/kept.txt", "tracked")
+        try sandbox.file("repo/out/page.html", "untracked")
+        try sandbox.file("repo/with space/dist/a.js", "tracked")
+        try sandbox.file("repo/buildx/b.txt", "tracked, but not inside build")
+        try run("git", "-C", repository.fsPath, "init", "-q")
+        try run("git", "-C", repository.fsPath, "add", "build/kept.txt", "with space/dist/a.js", "buildx/b.txt")
+        let git = try #require(Git.locate())
+
+        let folders = ["repo/build", "repo/out", "repo/with space/dist"].map(sandbox.url)
+        #expect(git.trackedFolders(among: folders, repository: repository)
+            == [sandbox.url("repo/build").fsPath, sandbox.url("repo/with space/dist").fsPath])
+    }
+
+    @Test(.enabled(if: Git.locate() != nil))
+    func gitIndexStateChangesWhenSomethingIsCommitted() throws {
+        let sandbox = try Sandbox()
+        let repository = try sandbox.folder("repo")
+        try sandbox.file("repo/a.txt", "a")
+        try sandbox.file("repo/build/b.txt", "b")
+        try run("git", "-C", repository.fsPath, "init", "-q")
+        #expect(GitIndexState(repository: repository) == .absent)
+
+        try run("git", "-C", repository.fsPath, "add", "a.txt")
+        let staged = try #require(GitIndexState(repository: repository))
+        #expect(GitIndexState(repository: repository) == staged)
+
+        try run("git", "-C", repository.fsPath, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "a")
+        try run("git", "-C", repository.fsPath, "add", "build/b.txt")
+        try run("git", "-C", repository.fsPath, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "b")
+        #expect(GitIndexState(repository: repository) != staged)
+
+        // A worktree's `.git` is a file naming its git folder.
+        let worktree = sandbox.url("worktree")
+        try run("git", "-C", repository.fsPath, "worktree", "add", "-q", worktree.fsPath)
+        #expect(FileSystem.info(worktree.appending(path: ".git"))?.isRegularFile == true)
+        let before = try #require(GitIndexState(repository: worktree))
+        #expect(before != .absent)
+        try sandbox.file("worktree/build/c.txt", "c")
+        try run("git", "-C", worktree.fsPath, "add", "build/c.txt")
+        #expect(GitIndexState(repository: worktree) != before)
+    }
+
     @Test(.enabled(if: Git.locate() != nil))
     func gitTrackedFiles() throws {
         let sandbox = try Sandbox()

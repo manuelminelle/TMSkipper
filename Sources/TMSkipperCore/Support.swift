@@ -153,3 +153,29 @@ public struct ScanLocations: Codable, Sendable, Equatable {
         return try? JSONDecoder().decode(ScanLocations.self, from: data)
     }
 }
+
+/// For each repository holding TMSkipper exclusions, the state of its git index at the last applied
+/// scan that found none of them holding tracked files. While the index stays the same, nothing new
+/// can have been committed into them, and git is not asked again.
+public struct VerifiedRepositories: Codable, Sendable, Equatable {
+    /// Repository path → state of its index.
+    public var indexes: [String: GitIndexState]
+
+    public init(indexes: [String: GitIndexState] = [:]) {
+        self.indexes = indexes
+    }
+
+    public static var fileURL: URL { Identity.supportDirectory.appending(path: "repositories.json") }
+
+    public func save() throws {
+        try FileManager.default.createDirectory(at: Identity.supportDirectory, withIntermediateDirectories: true)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+        try encoder.encode(self).write(to: Self.fileURL, options: .atomic)
+    }
+
+    public static func load() -> VerifiedRepositories? {
+        guard let data = try? Data(contentsOf: fileURL) else { return nil }
+        return try? JSONDecoder().decode(VerifiedRepositories.self, from: data)
+    }
+}
