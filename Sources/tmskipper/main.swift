@@ -31,11 +31,18 @@ Commands:
 func display(_ url: URL) -> String {
     let home = FileManager.default.homeDirectoryForCurrentUser.fsPath
     let path = url.fsPath
-    return path == home || path.hasPrefix(home + "/") ? "~" + path.dropFirst(home.count) : path
+    return sanitize(path == home || path.hasPrefix(home + "/") ? "~" + path.dropFirst(home.count) : path)
+}
+
+/// File names come from untrusted folders: control characters (terminal escape sequences) become "?".
+func sanitize(_ text: String) -> String {
+    String(String.UnicodeScalarView(text.unicodeScalars.map { scalar in
+        scalar.properties.generalCategory == .control ? "?" : scalar
+    }))
 }
 
 func printError(_ message: String) {
-    FileHandle.standardError.write(Data("tmskipper: \(message)\n".utf8))
+    FileHandle.standardError.write(Data("tmskipper: \(sanitize(message))\n".utf8))
 }
 
 func fail(_ message: String, code: Int32 = 1) -> Never {
@@ -96,7 +103,7 @@ func printItems(_ title: String, _ items: [ScanReport.Item], sizes: Bool) {
             total += size
             line += "  \(FileSystem.formatSize(size))"
         }
-        if let reason = item.reason { line += "  (\(reason))" }
+        if let reason = item.reason { line += "  (\(sanitize(reason)))" }
         print(line)
     }
     if sizes && items.count > 1 { print("  Total: \(FileSystem.formatSize(total))") }
@@ -122,9 +129,13 @@ func scan(_ options: Options) -> Int32 {
     let lock: ScanLock?
     do { lock = try ScanLock() } catch { fail("cannot create the lock file: \(error.localizedDescription)") }
     guard let lock else {
+        Log.scan.notice("another scan is running: this one was skipped")
         if !quiet { print("Another scan is running.") }
         return 0
     }
+    // The agent runs unattended: if a scan ever hangs, end it so later scans are not blocked
+    // behind the lock. SIGALRM's default action terminates the process.
+    if quiet { alarm(15 * 60) }
     defer { withExtendedLifetime(lock) {} }
 
     let scanner = makeScanner(loadConfig(), quiet: quiet)
@@ -153,7 +164,7 @@ func scan(_ options: Options) -> Int32 {
         printItems("Skipped (safety checks):", report.skipped, sizes: false)
         if !report.errors.isEmpty {
             print("Errors:")
-            report.errors.forEach { print("  \($0)") }
+            report.errors.forEach { print("  \(sanitize($0))") }
             print("")
         }
         print((dryRun ? "Dry run, nothing changed. " : "") + summary(report))
@@ -241,6 +252,9 @@ func status() -> Int32 {
     let installed = FileManager.default.fileExists(atPath: LaunchAgent.plistURL.fsPath)
     if installed {
         print("Agent:      \(LaunchAgent.isLoaded ? "running" : "installed but not loaded") (\(display(LaunchAgent.plistURL)))")
+        if let agentConfig = LaunchAgent.installedConfig, agentConfig != Config.defaultFileURL.fsPath {
+            print("            WARNING: the agent reads \(display(URL(filePath: agentConfig))): run `tmskipper install` again")
+        }
         if let executable = LaunchAgent.installedExecutable {
             let exists = FileManager.default.isExecutableFile(atPath: executable)
             print("Executable: \(display(URL(filePath: executable)))\(exists ? "" : "  (MISSING: reinstall)")")
@@ -308,7 +322,7 @@ func install(_ options: Options) -> Int32 {
         fail("this binary lives in a build folder that can be cleaned at any time.\nInstall with scripts/install.sh, which copies it to ~/.local/bin first.")
     }
     do {
-        try LaunchAgent.install(executable: executable, everyHours: hours)
+        try LaunchAgent.install(executable: executable, everyHours: hours, config: Config.defaultFileURL)
     } catch {
         fail("install failed: \(error)")
     }

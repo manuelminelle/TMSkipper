@@ -19,7 +19,9 @@ public enum LaunchAgent {
 
     private static var domain: String { "gui/\(getuid())" }
 
-    public static func propertyList(executable: URL, everyHours: Int) -> [String: Any] {
+    /// `config` is written into the agent's environment: launchd does not pass on shell variables
+    /// such as `XDG_CONFIG_HOME`, so without it the agent could read a different file.
+    public static func propertyList(executable: URL, everyHours: Int, config: URL) -> [String: Any] {
         let hours = Array(stride(from: 0, to: 24, by: everyHours))
         return [
             "Label": label,
@@ -31,17 +33,18 @@ public enum LaunchAgent {
             "LowPriorityIO": true,
             "Nice": 10,
             "StandardErrorPath": errorLogURL.fsPath,
+            "EnvironmentVariables": ["TMSKIPPER_CONFIG": config.fsPath],
         ]
     }
 
     /// Writes the property list and (re)loads the agent.
-    public static func install(executable: URL, everyHours: Int) throws {
+    public static func install(executable: URL, everyHours: Int, config: URL) throws {
         guard (1...24).contains(everyHours) else { throw ConfigError("--every must be between 1 and 24 hours") }
         let fileManager = FileManager.default
         try fileManager.createDirectory(at: plistURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         try fileManager.createDirectory(at: errorLogURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         let data = try PropertyListSerialization.data(
-            fromPropertyList: propertyList(executable: executable, everyHours: everyHours), format: .xml, options: 0
+            fromPropertyList: propertyList(executable: executable, everyHours: everyHours, config: config), format: .xml, options: 0
         )
         _ = launchctl(["bootout", "\(domain)/\(label)"])
         try data.write(to: plistURL, options: .atomic)
@@ -61,6 +64,15 @@ public enum LaunchAgent {
 
     public static var isLoaded: Bool {
         launchctl(["print", "\(domain)/\(label)"]).status == 0
+    }
+
+    /// Config file path written in the installed property list, if any.
+    public static var installedConfig: String? {
+        guard let data = try? Data(contentsOf: plistURL),
+              let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
+              let environment = plist["EnvironmentVariables"] as? [String: String]
+        else { return nil }
+        return environment["TMSKIPPER_CONFIG"]
     }
 
     /// Executable path written in the installed property list, if any.

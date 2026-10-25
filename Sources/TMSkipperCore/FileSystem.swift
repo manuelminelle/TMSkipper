@@ -15,6 +15,7 @@ extension URL {
 /// What `lstat` says about an item. Symbolic links are never followed.
 public struct ItemInfo: Sendable {
     public var isDirectory: Bool
+    public var isRegularFile: Bool
     public var isSymbolicLink: Bool
     public var isDataless: Bool
     public var size: Int64
@@ -29,10 +30,34 @@ public enum FileSystem {
         let type = st.st_mode & S_IFMT
         return ItemInfo(
             isDirectory: type == S_IFDIR,
+            isRegularFile: type == S_IFREG,
             isSymbolicLink: type == S_IFLNK,
             isDataless: st.st_flags & dataLessFlag != 0,
             size: Int64(st.st_size)
         )
+    }
+
+    /// Reads at most `maxBytes` from a regular file without ever blocking.
+    ///
+    /// Project folders can hold anything, so named pipes, sockets and devices (which would block
+    /// the scan forever), symbolic links and iCloud placeholders (which would be downloaded) are
+    /// refused with nil. The type is checked on the open descriptor, so a file swapped after an
+    /// earlier `lstat` is caught too.
+    public static func readPrefix(of url: URL, maxBytes: Int) -> Data? {
+        guard let info = info(url), info.isRegularFile, !info.isDataless else { return nil }
+        let fd = url.withUnsafeFileSystemRepresentation { open($0!, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC) }
+        guard fd >= 0 else { return nil }
+        defer { close(fd) }
+        var st = stat()
+        guard fstat(fd, &st) == 0, st.st_mode & S_IFMT == S_IFREG, st.st_flags & dataLessFlag == 0 else { return nil }
+        var buffer = [UInt8](repeating: 0, count: maxBytes)
+        var total = 0
+        while total < maxBytes {
+            let count = buffer.withUnsafeMutableBytes { read(fd, $0.baseAddress! + total, maxBytes - total) }
+            if count <= 0 { break }
+            total += count
+        }
+        return Data(buffer.prefix(total))
     }
 
     /// A child of a directory.

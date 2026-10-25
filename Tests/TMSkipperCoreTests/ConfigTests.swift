@@ -54,7 +54,7 @@ import Testing
               {"id": "godot", "folder": ".godot", "sentinels": ["project.godot"], "ecosystem": "Godot"}
             ]
           },
-          "guardedPaths": {"disable": ["~/.cache"], "add": ["~/.colima"]}
+          "guardedPaths": {"disable": ["~/.npm"], "add": ["~/.colima"]}
         }
         """))
 
@@ -63,7 +63,7 @@ import Testing
         #expect(config.rules.first { $0.id == "node-modules" }?.sentinels == ["package.json", "bun.lock"])
         #expect(config.rules.last?.id == "godot")
         let guarded = config.guardedPaths.map(display)
-        #expect(!guarded.contains("~/.cache"))
+        #expect(!guarded.contains("~/.npm"))
         #expect(guarded.contains("~/.colima"))
     }
 
@@ -95,8 +95,22 @@ import Testing
         #expect(!config.isProtected(home.appending(path: "Developer/web/node_modules")))
     }
 
+    @Test func protectedPathsIgnoreCaseAndSymbolicLinks() throws {
+        let sandbox = try Sandbox()
+        let real = try sandbox.folder("Release Kit")
+        try FileManager.default.createSymbolicLink(at: sandbox.url("alias"), withDestinationURL: real)
+        let config = try Config.resolve(decode(#"{"protectedPaths": ["\#(sandbox.url("alias").fsPath)", "/Volumes/Data/Client"]}"#))
+
+        #expect(config.isProtected(real.appending(path: "build")))
+        #expect(config.isProtected(URL(filePath: "/volumes/data/client/build")))
+        #expect(!config.isProtected(URL(filePath: "/Volumes/Data/Other")))
+    }
+
     @Test func launchAgentSchedule() {
-        let plist = LaunchAgent.propertyList(executable: URL(filePath: "/usr/local/bin/tmskipper"), everyHours: 6)
+        let plist = LaunchAgent.propertyList(
+            executable: URL(filePath: "/usr/local/bin/tmskipper"), everyHours: 6, config: URL(filePath: "/custom/config.json")
+        )
+        #expect(plist["EnvironmentVariables"] as? [String: String] == ["TMSKIPPER_CONFIG": "/custom/config.json"])
         let intervals = plist["StartCalendarInterval"] as? [[String: Int]]
         #expect(intervals?.map { $0["Hour"] } == [0, 6, 12, 18])
         #expect(plist["StartOnMount"] as? Bool == true)

@@ -22,10 +22,11 @@ public struct Config: Sendable {
     }
 
     /// True if excluding `url` would exclude a protected path: `url` is one, lies inside one or contains one.
+    /// Case-insensitive, as APFS is by default; on a case-sensitive volume this only protects more.
     public func isProtected(_ url: URL) -> Bool {
-        let path = url.fsPath
+        let path = url.fsPath.lowercased()
         return protectedPaths.contains { protected in
-            let protectedPath = protected.fsPath
+            let protectedPath = protected.fsPath.lowercased()
             return path == protectedPath || path.hasPrefix(protectedPath + "/") || protectedPath.hasPrefix(path + "/")
         }
     }
@@ -72,7 +73,6 @@ public struct Config: Sendable {
         "~/.gradle/wrapper",
         "~/.cargo/registry",
         "~/.rustup/toolchains",
-        "~/.cache",
     ]
 
     /// `$TMSKIPPER_CONFIG`, else `$XDG_CONFIG_HOME/tmskipper/config.json`, else `~/.config/tmskipper/config.json`.
@@ -147,7 +147,7 @@ public struct Config: Sendable {
             guarded.append(path)
         }
 
-        let protected = try alwaysProtectedPaths.map { URL(filePath: expandTilde($0)) }
+        let listedProtected = try alwaysProtectedPaths.map { URL(filePath: expandTilde($0)) }
             + (file.protectedPaths ?? []).map { path -> URL in
                 let expanded = expandTilde(path)
                 guard expanded.hasPrefix("/") else {
@@ -155,6 +155,12 @@ public struct Config: Sendable {
                 }
                 return URL(filePath: expanded)
             }
+        // Protect the real location too when a protected path is a symbolic link.
+        var protected: [URL] = []
+        for url in listedProtected + listedProtected.map({ $0.resolvingSymlinksInPath() })
+        where !protected.contains(where: { $0.fsPath == url.fsPath }) {
+            protected.append(url)
+        }
 
         return Config(
             roots: roots,

@@ -145,6 +145,16 @@ public struct FolderScanner {
 
     // MARK: - Walk
 
+    /// The nearest folder above `url` that holds a `.git` entry, if any.
+    static func enclosingRepository(of url: URL) -> URL? {
+        var current = url.standardizedFileURL.deletingLastPathComponent()
+        while current.fsPath != "/" {
+            if FileSystem.info(current.appending(path: ".git")) != nil { return current }
+            current = current.deletingLastPathComponent()
+        }
+        return nil
+    }
+
     private func traverse(
         root: URL,
         report: inout ScanReport,
@@ -160,7 +170,8 @@ public struct FolderScanner {
         if store.isExcludedIncludingAncestors(root) { return }
 
         var handled = Set<String>()
-        var stack: [(directory: URL, repository: URL?)] = [(root, nil)]
+        // A root can lie inside a repository: the tracked-files check must still find it.
+        var stack: [(directory: URL, repository: URL?)] = [(root, Self.enclosingRepository(of: root))]
         while let (directory, enclosingRepository) = stack.popLast() {
             report.directoriesVisited += 1
             let entries: [FileSystem.Entry]
@@ -180,8 +191,13 @@ public struct FolderScanner {
                 guard let first = byName[components[0]], first.isDirectory else { continue }
                 let candidate = directory.appending(path: rule.folder)
                 guard !handled.contains(candidate.fsPath) else { continue }
+                // Every component must be a real folder: a symbolic link in the middle could lead outside the roots.
                 if components.count > 1 {
-                    guard let info = FileSystem.info(candidate), info.isDirectory else { continue }
+                    var path = directory
+                    guard components.allSatisfy({ component in
+                        path = path.appending(path: component)
+                        return FileSystem.info(path)?.isDirectory == true
+                    }) else { continue }
                 }
                 guard RuleMatcher.sentinelsMatch(rule, in: directory, names: names) else { continue }
                 handled.insert(candidate.fsPath)
@@ -250,7 +266,8 @@ public struct FolderScanner {
     private func revalidateOwned(_ url: URL, marker: String, apply: Bool, report: inout ScanReport) {
         if config.isProtected(url) {
             remove(url, ruleID: marker, reason: "in protectedPaths", apply: apply, report: &report)
-        } else if FileSystem.info(url)?.isDirectory == true, let item = RuleMatcher.protectedItem(in: url) {
+        } else if let info = FileSystem.info(url), info.isDirectory, !info.isDataless,
+                  let item = RuleMatcher.protectedItem(in: url) {
             remove(url, ruleID: marker, reason: "now contains \(item)", apply: apply, report: &report)
         } else {
             report.kept.append(.init(url: url, ruleID: marker))

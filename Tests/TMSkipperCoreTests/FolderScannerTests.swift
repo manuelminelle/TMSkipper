@@ -73,6 +73,59 @@ import Testing
         #expect(store.excludedPaths == [sandbox.url("projects/web/node_modules").fsPath])
     }
 
+    @Test(.timeLimit(.minutes(1)))
+    func namedPipesNeverBlockTheScan() throws {
+        try sandbox.file("projects/app/build.gradle", "")
+        try sandbox.folder("projects/app/build")
+        try sandbox.folder("projects/web/.next")
+        try sandbox.folder("projects/tool/cache")
+        // A pipe where a key, a package.json and a CACHEDIR.TAG would be read.
+        for path in ["projects/app/build/deploy-key", "projects/web/package.json", "projects/tool/cache/CACHEDIR.TAG"] {
+            #expect(mkfifo(sandbox.url(path).fsPath, 0o644) == 0)
+        }
+
+        let report = scan()
+
+        #expect(report.excluded.map(\.url.fsPath) == [sandbox.url("projects/app/build").fsPath])
+        #expect(report.errors.isEmpty)
+    }
+
+    @Test func neverExcludesAWholeRepository() throws {
+        // A downloaded repository with a committed CACHEDIR.TAG at its top level.
+        try sandbox.folder("projects/library/.git")
+        try sandbox.file("projects/library/src/main.c", "int main(void) { return 0; }")
+        try sandbox.file("projects/library/CACHEDIR.TAG", RuleMatcher.cacheDirTagSignature)
+
+        let report = scan()
+
+        #expect(report.skipped.map(\.reason) == ["contains .git"])
+        #expect(store.excludedPaths.isEmpty)
+    }
+
+    @Test func checksTrackedFilesWhenTheRootIsInsideARepository() throws {
+        try sandbox.folder(".git")
+        try sandbox.file("projects/web/package.json", "{}")
+        let modules = try sandbox.folder("projects/web/node_modules")
+
+        let report = scan(git: FakeGit(tracked: [modules.fsPath]))
+
+        #expect(report.skipped.first?.reason == "contains files tracked by git")
+        #expect(store.excludedPaths.isEmpty)
+    }
+
+    @Test func deepRuleFoldersNeverCrossSymbolicLinks() throws {
+        try sandbox.folder("outside/c")
+        try sandbox.file("projects/app/tool.cfg", "")
+        try sandbox.folder("projects/app/a")
+        try FileManager.default.createSymbolicLink(at: sandbox.url("projects/app/a/b"), withDestinationURL: sandbox.url("outside"))
+        let deep = Rule(id: "deep", folder: "a/b/c", sentinels: ["tool.cfg"], ecosystem: "Test")
+
+        let report = scan(sandbox.config(rules: [deep]))
+
+        #expect(report.excluded.isEmpty)
+        #expect(store.excludedPaths.isEmpty)
+    }
+
     @Test func neverExcludesFoldersContainingProtectedPaths() throws {
         try sandbox.file("projects/app/build.gradle", "")
         try sandbox.folder("projects/app/build/keys")

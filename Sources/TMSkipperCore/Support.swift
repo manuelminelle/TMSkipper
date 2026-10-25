@@ -27,7 +27,7 @@ public final class ScanLock {
     public init?() throws {
         try FileManager.default.createDirectory(at: Identity.supportDirectory, withIntermediateDirectories: true)
         let path = Identity.supportDirectory.appending(path: "scan.lock").fsPath
-        let fd = open(path, O_CREAT | O_RDWR | O_CLOEXEC, 0o644)
+        let fd = open(path, O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0o644)
         guard fd >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
         guard flock(fd, LOCK_EX | LOCK_NB) == 0 else {
             close(fd)

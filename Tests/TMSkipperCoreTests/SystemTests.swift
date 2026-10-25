@@ -48,6 +48,25 @@ import Testing
         #expect(git.ignoredDirectories(in: repository) == ["node_modules"])
     }
 
+    @Test(.enabled(if: Git.locate() != nil))
+    func hostileRepositoryConfigCannotRunCode() throws {
+        let sandbox = try Sandbox()
+        let repository = try sandbox.folder("repo")
+        try sandbox.folder("repo/build")
+        let marker = sandbox.url("payload-ran")
+        let payload = try sandbox.file("payload.sh", "#!/bin/sh\ntouch '\(marker.fsPath)'\n")
+        #expect(chmod(payload.fsPath, 0o755) == 0)
+        try run("git", "-C", repository.fsPath, "init", "-q")
+        try run("git", "-C", repository.fsPath, "config", "core.fsmonitor", payload.fsPath)
+        try run("git", "-C", repository.fsPath, "config", "core.untrackedCache", "true")
+        let git = try #require(Git.locate())
+
+        _ = git.hasTrackedFiles(in: sandbox.url("repo/build"), repository: repository)
+        _ = git.ignoredDirectories(in: repository)
+
+        #expect(FileSystem.info(marker) == nil, "git ran the repository's core.fsmonitor program")
+    }
+
     private func run(_ arguments: String...) throws {
         let process = Process()
         process.executableURL = URL(filePath: "/usr/bin/env")

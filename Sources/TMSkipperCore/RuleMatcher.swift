@@ -6,8 +6,9 @@ enum RuleMatcher {
     static let cacheDirTagSignature = "Signature: 8a477f597d28d172789f06886806bc55"
 
     /// Names that must never end up excluded: if a candidate holds one at its top level, it is skipped.
+    /// `.git` keeps a whole repository (for example one with a committed CACHEDIR.TAG) in the backup.
     static let protectedPatterns = [
-        ".env*", "*.p8", "*.p12", "*.pem", "*.key", "*.jks", "*.keystore",
+        ".git", ".env*", "*.p8", "*.p12", "*.pem", "*.key", "*.jks", "*.keystore",
         "*.mobileprovision", "*.cer", "id_rsa*", "id_ed25519*", "id_ecdsa*",
         "gradle.properties", ".npmrc", ".netrc", "credentials*", "secrets*",
     ]
@@ -34,9 +35,8 @@ enum RuleMatcher {
 
     /// True if the package.json at `url` lists `dependency` in dependencies or devDependencies.
     static func packageJSON(_ url: URL, declares dependency: String) -> Bool {
-        guard let info = FileSystem.info(url), !info.isDirectory, !info.isSymbolicLink,
-              !info.isDataless, info.size < 1_000_000,
-              let data = try? Data(contentsOf: url),
+        guard let info = FileSystem.info(url), info.size < 1_000_000,
+              let data = FileSystem.readPrefix(of: url, maxBytes: 1_000_000),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else { return false }
         return ["dependencies", "devDependencies"].contains { key in
@@ -47,11 +47,7 @@ enum RuleMatcher {
     /// True if `directory` holds a CACHEDIR.TAG file with the standard signature.
     static func hasCacheDirTag(_ directory: URL) -> Bool {
         let tag = directory.appending(path: "CACHEDIR.TAG")
-        guard let info = FileSystem.info(tag), !info.isDirectory, !info.isSymbolicLink, !info.isDataless,
-              let handle = try? FileHandle(forReadingFrom: tag)
-        else { return false }
-        defer { try? handle.close() }
-        let data = (try? handle.read(upToCount: cacheDirTagSignature.utf8.count)) ?? Data()
+        guard let data = FileSystem.readPrefix(of: tag, maxBytes: cacheDirTagSignature.utf8.count) else { return false }
         return String(decoding: data, as: UTF8.self) == cacheDirTagSignature
     }
 
@@ -70,12 +66,12 @@ enum RuleMatcher {
 
     /// True if the file starts like a PEM or OpenSSH private key ("-----BEGIN … PRIVATE KEY-----").
     /// A placeholder whose content is in iCloud counts as a key: it cannot be read without downloading it.
+    /// Named pipes, sockets and devices are never opened.
     static func isPrivateKey(_ url: URL) -> Bool {
-        guard let info = FileSystem.info(url), !info.isDirectory, !info.isSymbolicLink else { return false }
+        guard let info = FileSystem.info(url), info.isRegularFile else { return false }
         if info.isDataless { return true }
-        guard info.size < 1_000_000, let handle = try? FileHandle(forReadingFrom: url) else { return false }
-        defer { try? handle.close() }
-        let prefix = String(decoding: (try? handle.read(upToCount: 64)) ?? Data(), as: UTF8.self)
+        guard let data = FileSystem.readPrefix(of: url, maxBytes: 64) else { return false }
+        let prefix = String(decoding: data, as: UTF8.self)
         return prefix.hasPrefix("-----BEGIN") && prefix.contains("PRIVATE KEY-----")
     }
 }

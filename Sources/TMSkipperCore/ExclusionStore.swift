@@ -58,16 +58,19 @@ public struct SystemExclusionStore: ExclusionStore {
         }
     }
 
+    /// Writes the marker first: if the process stops between the two writes, a marker without an
+    /// exclusion is ignored by `list` and `reset` and fixed by the next scan, while an exclusion
+    /// without a marker could never be listed or reset.
     public func exclude(_ url: URL, marker: String) throws {
-        try setExcluded(url, true)
         let bytes = Array(marker.utf8)
         let result = url.withUnsafeFileSystemRepresentation { path in
             setxattr(path!, Self.markerAttribute, bytes, bytes.count, 0, XATTR_NOFOLLOW)
         }
-        if result != 0 {
-            let error = POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
-            // Without the marker the exclusion could never be listed or reset: roll it back.
-            try? setExcluded(url, false)
+        if result != 0 { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        do {
+            try setExcluded(url, true)
+        } catch {
+            _ = url.withUnsafeFileSystemRepresentation { removexattr($0!, Self.markerAttribute, XATTR_NOFOLLOW) }
             throw error
         }
     }

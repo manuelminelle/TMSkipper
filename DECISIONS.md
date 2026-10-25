@@ -125,6 +125,28 @@ Settled before publishing, because they cannot change later without breaking exi
 - **Identifiers.** The ownership marker written on users' folders, the LaunchAgent label and the log subsystem use `io.github.manuelminelle.tmskipper`: a namespace tied to the GitHub account, the usual choice for open-source tools without a domain. Renaming the marker later would hide every existing exclusion from `list` and `reset`.
 - **Default roots.** `~/Developer` is common on macOS but far from universal. Without `roots` in the config, the usual project folders that exist are scanned (`~/Developer`, `~/Projects`, `~/Code`, `~/src`, `~/dev`, `~/repos`, `~/workspace`, `~/GitHub`); symbolic links and roots nested inside another root are skipped.
 
+## D12. Security review before release
+
+Project folders are partly untrusted: they hold archives, downloads and other people's repositories, and the agent works on them unattended. A review (one pass by the author, one independent pass that did not see the first one's conclusions) found and fixed, each with a regression test that fails without the fix:
+
+| Finding | Severity | Fix |
+|---|---|---|
+| A `.git/config` with `core.fsmonitor` made `git ls-files` run an arbitrary program (verified) | High | git runs with `-c core.fsmonitor=false -c core.untrackedCache=false -c core.hooksPath=/dev/null`, which override the repository's settings, and is killed after 60 s |
+| A named pipe in a candidate folder blocked the scan forever and, through the lock, every later scan (verified) | Medium | Files are opened with `O_NONBLOCK \| O_NOFOLLOW` and read only if `fstat` says they are regular; the agent's scan ends after 15 minutes; skipped scans are logged |
+| A repository whose top level held a committed `CACHEDIR.TAG` was excluded whole, sources and `.git` included (verified) | Medium | `.git` is a protected name: a folder holding it is never excluded |
+| With a root inside a repository, the tracked-files check was skipped (verified) | Medium | The enclosing repository is looked up above each root |
+| The agent did not inherit `XDG_CONFIG_HOME` or `TMSKIPPER_CONFIG`, so it could read a different config than the shell | Medium | The resolved config path is written into the agent's environment at install time |
+| `protectedPaths` compared paths with exact case, while APFS ignores it (verified) | Low | Case-insensitive comparison, plus the target of a protected symbolic link |
+| A nested rule folder could pass through a symbolic link in the middle of its path (verified) | Low | Every component must be a real folder |
+| `~/.cache` was guarded by default but may hold tokens | Low | Removed from the defaults |
+
+Accepted, documented risks:
+
+- **Top-level secret check.** Only the top level of a candidate is checked for secret names and private keys. Deeper files are covered by the tracked-files check when the project uses git.
+- **Committed after exclusion.** A folder already excluded is not checked again for git-tracked files: that would cost one git call per exclusion on every scan, right when the backup disk is mounted.
+- **Same-user attacker.** A process running as the user could swap a folder for a symbolic link between the check and the write. It could already change the user's backups directly, so this gives it nothing new.
+- **Paths in the unified log** are logged as public so that `log show` is useful; they stay on the Mac unless the user shares a system diagnostic report.
+
 ## Verification status
 
 | Hypothesis | Result |
