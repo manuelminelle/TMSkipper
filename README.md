@@ -101,7 +101,7 @@ Everything works without a config file. To change the defaults, run `tmskipper i
     ]
   },
   "guardedPaths": {
-    "disable": ["~/.cache"],
+    "disable": ["~/Library/Developer/CoreSimulator/Devices"],
     "add": ["~/.colima"]
   },
   "protectedPaths": ["~/Developer/client/release-package"]
@@ -182,7 +182,7 @@ or `scripts/uninstall.sh --reset`, which also removes the binary. Exclusions you
 scripts/uninstall.sh --reset   # stops the agent, removes TMSkipper's exclusions and the binary
 ```
 
-Without `--reset` the exclusions stay in place. The config file in `~/.config/tmskipper` is kept.
+Without `--reset` the exclusions stay in place. The config file in `~/.config/tmskipper` is kept, and so are the scan state in `~/Library/Application Support/TMSkipper` and the agent's startup errors in `~/Library/Logs/TMSkipper`: delete both folders by hand for a complete removal, after `reset`, which uses the saved state to find exclusions in roots no longer in the config.
 
 ## Contributing
 

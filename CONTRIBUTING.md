@@ -29,6 +29,10 @@ Use `TMSKIPPER_CONFIG=/path/to/config.json` to point a run at a test configurati
 | `Sources/TMSkipperCore/RuleMatcher.swift` | Sentinel matching and the safety checks (secrets, private keys, CACHEDIR.TAG) |
 | `Sources/TMSkipperCore/FolderScanner.swift` | The walk, the decisions, guarded paths, `list`, `reset`, `suggest` |
 | `Sources/TMSkipperCore/ExclusionStore.swift` | Reading and writing the exclusion and the ownership marker |
+| `Sources/TMSkipperCore/ExclusionIndex.swift` | The Spotlight query that finds exclusions copied out of the roots |
+| `Sources/TMSkipperCore/Git.swift` | The hardened git calls (tracked and ignored files) and the index state |
+| `Sources/TMSkipperCore/FileSystem.swift` | `lstat`, non-blocking reads, directory listing, path comparison |
+| `Sources/TMSkipperCore/Support.swift` | Identity, logging, subprocesses, the scan lock and the state files |
 | `Sources/TMSkipperCore/Config.swift` | Config file, defaults, protected and guarded paths |
 | `Sources/TMSkipperCore/LaunchAgent.swift` | The LaunchAgent property list and `launchctl` calls |
 | `Sources/tmskipper/main.swift` | The command-line interface |
@@ -56,6 +60,8 @@ Folders that are only *often* regenerable, such as `dist`, `build` or `vendor` w
 
 - Swift 6 language mode, strict concurrency, no third-party dependencies.
 - Keep the scan single-threaded: Foundation's exclusion setter is not reliable across threads (see DECISIONS.md, D3).
+- Write exclusions only through `ExclusionStore`: Foundation's setter follows symbolic links, and the store makes sure every write lands on the folder that was checked (D3, D12).
+- Never follow symbolic links or open files that could block: use `FileSystem.info` and `FileSystem.readPrefix`.
 - Match the surrounding style: small types, comments that explain *why*.
 - Tests that touch real file attributes live in `SystemTests` and run serialized.
 

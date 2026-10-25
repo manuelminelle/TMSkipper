@@ -16,6 +16,6 @@ jobs:
       - name: Swift version
         run: swift --version
       - name: Build
-        run: swift build -c release
+        run: swift build -c release -Xswiftc -warnings-as-errors
       - name: Test
         run: swift test

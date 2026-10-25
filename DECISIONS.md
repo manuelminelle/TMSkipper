@@ -55,7 +55,7 @@ The first proposal was a resident watcher on FSEvents, to beat the hourly Time M
 - the backup disk is connected by cable every 1–4 days, not hourly;
 - the Mac spends a lot of time asleep with the lid closed.
 
-What matters is that everything is excluded **when the disk is connected**. The LaunchAgent therefore runs a short scan and exits. Measured on `~/Developer` (3,239 folders visited): 1.5 s for a run with 18 new candidates, most of it spent in one `git ls-files` per new candidate (D7); later runs skip already-excluded folders and the git check.
+What matters is that everything is excluded **when the disk is connected**. The LaunchAgent therefore runs a short scan and exits. Measured on `~/Developer` (3,239 folders visited): 1.5 s for a run with 18 new candidates, most of it spent in one `git ls-files` per new candidate (D7); later runs skip already-excluded folders, and ask git about them only for repositories whose index changed (D12).
 
 | Trigger | launchd key | Purpose |
 |---|---|---|
