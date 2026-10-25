@@ -198,7 +198,152 @@ import Testing
         #expect(git.hasTrackedFiles(in: sandbox.url("repo/:(attr:none)x/build"), repository: repository) == true)
     }
 
+    /// The whole cycle with the default rules, the real store and the real git, checked with `tmutil`.
+    @Test(.enabled(if: Git.locate() != nil))
+    func endToEndWithTheRealStoreAndGit() throws {
+        let sandbox = try Sandbox(base: FileManager.default.homeDirectoryForCurrentUser)
+        #expect(try !isExcludedByTimeMachine(sandbox.root), "the sandbox is already excluded: tmutil cannot tell anything")
+        let git = try #require(Git.locate())
+        let store = SystemExclusionStore()
+        func commit(_ repository: String, _ paths: String...) throws {
+            let path = sandbox.url(repository).fsPath
+            try run(["git", "-C", path, "add", "-f", "--"] + paths)
+            try run("git", "-C", path, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "commit")
+        }
+
+        try sandbox.file("projects/web-app/package.json", #"{"dependencies":{"next":"15.0.0"}}"#)
+        try sandbox.file("projects/web-app/next.config.mjs")
+        try sandbox.file("projects/web-app/.env.local", "SECRET=1")
+        try sandbox.file("projects/web-app/node_modules/react/index.js")
+        try sandbox.file("projects/web-app/.next/cache/a")
+        try run("git", "-C", sandbox.url("projects/web-app").fsPath, "init", "-q")
+        try commit("projects/web-app", "package.json", "next.config.mjs")
+        try sandbox.file("projects/docs-site/astro.config.mjs")
+        try sandbox.file("projects/docs-site/dist/index.html")
+        try run("git", "-C", sandbox.url("projects/docs-site").fsPath, "init", "-q")
+        try commit("projects/docs-site", ".")
+        try sandbox.file("projects/release-kit/build.gradle")
+        try sandbox.file("projects/release-kit/build/upload.keystore")
+        try sandbox.file("projects/rust-tool/Cargo.toml")
+        try sandbox.file("projects/rust-tool/target/notes.txt", "-----BEGIN OPENSSH PRIVATE KEY-----\nabc")
+        try sandbox.file("projects/ios-kit/Package.swift")
+        try sandbox.file("projects/ios-kit/.build/debug/x")
+        try sandbox.file("projects/py-tool/pyproject.toml")
+        try sandbox.file("projects/py-tool/.venv/bin/python")
+        try sandbox.file("projects/py-tool/.pytest_cache/CACHEDIR.TAG", "Signature: 8a477f597d28d172789f06886806bc55\n")
+        try sandbox.file("projects/plain/dist/deliverable.zip")
+        try sandbox.file("projects/client/package.json", "{}")
+        try sandbox.file("projects/client/node_modules/a")
+        let documents = try sandbox.folder("Documents")
+        try sandbox.file("projects/linked/package.json", "{}")
+        try FileManager.default.createSymbolicLink(at: sandbox.url("projects/linked/node_modules"), withDestinationURL: documents)
+        try sandbox.file("projects/other/package.json", "{}")
+        var excludedByOthers = try sandbox.folder("projects/other/node_modules")
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        try excludedByOthers.setResourceValues(values)
+
+        var config = sandbox.config()
+        config.protectedPaths = [sandbox.url("projects/client")]
+        let expected = Set([
+            "projects/web-app/node_modules", "projects/web-app/.next", "projects/ios-kit/.build",
+            "projects/py-tool/.venv", "projects/py-tool/.pytest_cache",
+        ].map { sandbox.url($0).fsPath })
+
+        let dryRun = FolderScanner(config: config, git: git).scan(apply: false)
+        #expect(dryRun.errors.isEmpty)
+        #expect(Set(dryRun.excluded.map(\.url.fsPath)) == expected)
+        #expect(expected.allSatisfy { !store.isExcluded(URL(filePath: $0)) }, "a dry run wrote an exclusion")
+        let skipped = Dictionary(uniqueKeysWithValues: dryRun.skipped.map { ($0.url.fsPath, $0.reason ?? "") })
+        #expect(skipped == [
+            sandbox.url("projects/docs-site/dist").fsPath: "contains files tracked by git",
+            sandbox.url("projects/release-kit/build").fsPath: "contains upload.keystore",
+            sandbox.url("projects/rust-tool/target").fsPath: "contains notes.txt",
+            sandbox.url("projects/client/node_modules").fsPath: "in protectedPaths",
+        ])
+        #expect(dryRun.excludedByOthers.map(\.url.fsPath) == [excludedByOthers.fsPath])
+
+        let first = FolderScanner(config: config, git: git).scan(apply: true)
+        #expect(first.errors.isEmpty)
+        #expect(Set(first.excluded.map(\.url.fsPath)) == expected)
+        for path in expected { #expect(try isExcludedByTimeMachine(URL(filePath: path)), "\(path) is not excluded") }
+        for path in ["projects/web-app/.env.local", "projects/plain/dist", "projects/docs-site/dist",
+                     "projects/release-kit/build", "projects/client/node_modules", "Documents"] {
+            #expect(try !isExcludedByTimeMachine(sandbox.url(path)), "\(path) is excluded")
+        }
+
+        // A second scan changes nothing and records the repositories found clean.
+        let rescanner = FolderScanner(config: config, git: git, previous: ScanLocations(config))
+        let second = rescanner.scan(apply: true)
+        #expect(second.excluded.isEmpty && second.removed.isEmpty && second.errors.isEmpty)
+        #expect(Set(second.kept.map(\.url.fsPath)) == expected)
+        let verified = rescanner.verifiedRepositories(after: second)
+
+        // A file committed, a secret added, a sentinel deleted: each exclusion is removed.
+        try commit("projects/web-app", "node_modules/react/index.js")
+        try sandbox.file("projects/ios-kit/.build/.env", "KEY=1")
+        try FileManager.default.removeItem(at: sandbox.url("projects/py-tool/pyproject.toml"))
+        let third = FolderScanner(config: config, git: git, previous: ScanLocations(config), verified: verified).scan(apply: true)
+        #expect(third.errors.isEmpty)
+        #expect(Dictionary(uniqueKeysWithValues: third.removed.map { ($0.url.fsPath, $0.reason ?? "") }) == [
+            sandbox.url("projects/web-app/node_modules").fsPath: "now contains files tracked by git",
+            sandbox.url("projects/ios-kit/.build").fsPath: "now contains .env",
+            sandbox.url("projects/py-tool/.venv").fsPath: "rule python-venv no longer applies",
+        ])
+        #expect(try !isExcludedByTimeMachine(sandbox.url("projects/web-app/node_modules")))
+        #expect(try !isExcludedByTimeMachine(sandbox.url("projects/ios-kit/.build")))
+        #expect(try !isExcludedByTimeMachine(sandbox.url("projects/py-tool/.venv")))
+
+        // `cp -R` carries the exclusion and the marker: the copy outside the roots is included again.
+        let copy = sandbox.url("delivered")
+        try run("cp", "-R", sandbox.url("projects/web-app/.next").fsPath, copy.fsPath)
+        #expect(store.marker(of: copy) == "next")
+        let fourth = FolderScanner(config: config, git: git, index: FakeIndex(items: [copy]), previous: ScanLocations(config))
+            .scan(apply: true)
+        #expect(fourth.removed.map(\.url.fsPath) == [copy.fsPath])
+        #expect(try !isExcludedByTimeMachine(copy))
+
+        // A root removed from the config loses its exclusions.
+        try sandbox.file("projects2/app/package.json", "{}")
+        try sandbox.folder("projects2/app/node_modules")
+        var twoRoots = config
+        twoRoots.roots.append(sandbox.url("projects2"))
+        _ = FolderScanner(config: twoRoots, git: git).scan(apply: true)
+        #expect(try isExcludedByTimeMachine(sandbox.url("projects2/app/node_modules")))
+        let fifth = FolderScanner(config: config, git: git, previous: ScanLocations(twoRoots)).scan(apply: true)
+        #expect(fifth.removed.map(\.url.fsPath) == [sandbox.url("projects2/app/node_modules").fsPath])
+        #expect(try !isExcludedByTimeMachine(sandbox.url("projects2/app/node_modules")))
+
+        // `list` and `reset` only see TMSkipper's exclusions.
+        let scanner = FolderScanner(config: config, git: git)
+        let remaining = Set(["projects/web-app/.next", "projects/py-tool/.pytest_cache"].map { sandbox.url($0).fsPath })
+        #expect(Set(scanner.findOwned().kept.map(\.url.fsPath)) == remaining)
+        let reset = scanner.reset(apply: true)
+        #expect(reset.errors.isEmpty)
+        #expect(Set(reset.removed.map(\.url.fsPath)) == remaining)
+        #expect(scanner.findOwned().kept.isEmpty)
+        for path in remaining { #expect(try !isExcludedByTimeMachine(URL(filePath: path))) }
+        #expect(try isExcludedByTimeMachine(excludedByOthers), "reset removed an exclusion made by someone else")
+    }
+
+    /// What Time Machine itself reports, sticky and path-based exclusions included.
+    private func isExcludedByTimeMachine(_ url: URL) throws -> Bool {
+        let process = Process()
+        process.executableURL = URL(filePath: "/usr/bin/tmutil")
+        process.arguments = ["isexcluded", url.fsPath]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        try process.run()
+        let output = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        return String(decoding: output, as: UTF8.self).hasPrefix("[Excluded]")
+    }
+
     private func run(_ arguments: String...) throws {
+        try run(arguments)
+    }
+
+    private func run(_ arguments: [String]) throws {
         let process = Process()
         process.executableURL = URL(filePath: "/usr/bin/env")
         process.arguments = arguments

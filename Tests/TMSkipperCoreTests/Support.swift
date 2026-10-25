@@ -5,8 +5,10 @@ import Foundation
 final class Sandbox {
     let root: URL
 
-    init() throws {
-        root = FileManager.default.temporaryDirectory
+    /// `base` is the temporary folder by default. macOS excludes it from backups by path, so a test
+    /// that asks `tmutil isexcluded` needs another base, such as the home folder.
+    init(base: URL = FileManager.default.temporaryDirectory) throws {
+        root = base
             .appending(path: "tmskipper-tests-\(UUID().uuidString)")
             .resolvingSymlinksInPath()
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
