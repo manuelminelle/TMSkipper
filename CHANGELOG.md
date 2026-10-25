@@ -1,8 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.2.0
 
-Security fixes from a review before the first public release:
+Security fixes from a review before the first public release. Upgrade from 0.1.0, which is affected by all of them.
 
 - A repository with a hostile `.git/config` (`core.fsmonitor`) could make git run a program when TMSkipper queried it. git now runs with hooks, file-system monitors and the untracked cache disabled, and with a 60-second limit.
 - A named pipe inside a project could block a scan forever and stop the agent. Files are now read only if they are regular files, without ever blocking; an unattended scan also ends after 15 minutes.
@@ -38,7 +38,7 @@ Other changes:
 
 ## 0.1.0
 
-First release.
+First release. Not supported: it has the security issues fixed in 0.2.0.
 
 - Sentinel rules for Node.js and its frameworks, Apple, Gradle/Android, Rust, Python, Dart/Flutter, .NET, Elixir, Zig, Haskell and Terraform, plus any folder holding a valid `CACHEDIR.TAG`.
 - Safety checks before every exclusion: secrets and private keys (by name and by content), files tracked by git, symbolic links, iCloud placeholders.

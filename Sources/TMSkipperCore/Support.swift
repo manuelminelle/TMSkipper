@@ -5,7 +5,7 @@ import os
 public enum Identity {
     /// Reverse-DNS identifier: unified-log subsystem and LaunchAgent label.
     public static let identifier = "io.github.manuelminelle.tmskipper"
-    public static let version = "0.1.0"
+    public static let version = "0.2.0"
 
     /// `~/Library/Application Support/TMSkipper`, created on demand.
     public static var supportDirectory: URL {
