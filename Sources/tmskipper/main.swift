@@ -106,7 +106,9 @@ func printItems(_ title: String, _ items: [ScanReport.Item], sizes: Bool) {
 func summary(_ report: ScanReport) -> String {
     let seconds = String(format: "%.2f", report.duration)
     return "\(report.directoriesVisited) folders visited in \(seconds) s: "
-        + "\(report.excluded.count) excluded, \(report.removed.count) removed, "
+        + (report.applied
+            ? "\(report.excluded.count) excluded, \(report.removed.count) removed, "
+            : "\(report.excluded.count) to exclude, \(report.removed.count) to remove, ")
         + "\(report.skipped.count) skipped, \(report.kept.count) already excluded by TMSkipper, "
         + "\(report.excludedByOthers.count) already excluded by others, \(report.errors.count) errors"
 }

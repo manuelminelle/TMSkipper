@@ -1,0 +1,50 @@
+name: New rule
+description: Propose a regenerable folder that TMSkipper should exclude by default.
+labels: [rule]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A rule is accepted when the folder is regenerable with one command, the sentinel is specific to one tool, and the folder never holds user data. See CONTRIBUTING.md.
+  - type: input
+    id: ecosystem
+    attributes:
+      label: Tool or ecosystem
+      placeholder: e.g. Godot
+    validations:
+      required: true
+  - type: input
+    id: folder
+    attributes:
+      label: Folder to exclude
+      description: Path relative to the project folder.
+      placeholder: e.g. .godot
+    validations:
+      required: true
+  - type: input
+    id: sentinels
+    attributes:
+      label: Sentinel files
+      description: Files that always sit next to the folder and prove the tool created it.
+      placeholder: e.g. project.godot
+    validations:
+      required: true
+  - type: input
+    id: regenerate
+    attributes:
+      label: Command that regenerates the folder
+      placeholder: e.g. opening the project in the Godot editor, or `godot --headless --import`
+    validations:
+      required: true
+  - type: textarea
+    id: contents
+    attributes:
+      label: What the folder contains
+      description: Can it ever hold user data, configuration, credentials or deliverables? Link the tool's documentation if possible.
+    validations:
+      required: true
+  - type: input
+    id: size
+    attributes:
+      label: Typical size
+      placeholder: e.g. 200 MB to 2 GB

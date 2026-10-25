@@ -23,6 +23,31 @@ TMSkipper sets the exclusion through the Foundation API in about a millisecond. 
 - **Ownership marker.** Every exclusion made by TMSkipper carries an extra attribute, so `list` and `reset` never touch exclusions you made by hand. When a rule stops matching, the exclusion it added is removed.
 - **Triggers.** A LaunchAgent runs a short scan at login, every 6 hours (catching up on wake if the Mac was asleep) and whenever a disk is mounted, so connecting the backup disk starts a scan first. No resident process, no polling, no network, no `sudo`.
 
+## Example
+
+A dry run on a folder of sample projects:
+
+```text
+$ tmskipper scan --dry-run
+Would exclude:
+  ~/Projects/android-app/.gradle  [gradle-cache]  8.2 MB
+  ~/Projects/android-app/app/build  [gradle-build]  46.1 MB
+  ~/Projects/ios-kit/.build  [swiftpm-build]  61.4 MB
+  ~/Projects/py-tool/.pytest_cache  [cachedir-tag]  4 KB
+  ~/Projects/py-tool/.venv  [python-venv]  30.7 MB
+  ~/Projects/web-app/.next  [next]  92.2 MB
+  ~/Projects/web-app/node_modules  [node-modules]  204.8 MB
+  Total: 443.4 MB
+
+Skipped (safety checks):
+  ~/Projects/docs-site/dist  [astro-dist]  (contains files tracked by git)
+  ~/Projects/release-kit/build  [gradle-build]  (contains upload.keystore)
+
+Dry run, nothing changed. 8 folders visited in 0.09 s: 7 to exclude, 0 to remove, 2 skipped, 0 already excluded by TMSkipper, 0 already excluded by others, 0 errors
+```
+
+`web-app/.env.local` is not in the list: files and folders without a matching rule are never touched. The committed `dist` and the `build` folder holding a keystore are skipped by the safety checks.
+
 ## Install
 
 Requires macOS 13 or later and a Swift 6 toolchain (Xcode or the Command Line Tools).
@@ -114,6 +139,40 @@ Sentinel syntax, relative to the folder's parent:
 
 A plain `dist` or `build` folder without a framework-specific sentinel is never excluded: it may be a deliverable.
 
+## Troubleshooting
+
+**A folder was not excluded.** Run `tmskipper scan --dry-run` and look for it:
+
+- under *Skipped*, with the reason: it contains files tracked by git, a secret or a private key, or it is in `protectedPaths`;
+- not listed at all: check that it is inside one of the roots (`tmskipper rules`) and that the rule's sentinel sits next to it. Folders inside an already excluded folder are not scanned, because Time Machine skips them anyway.
+
+If the folder is regenerable but no rule covers it, add one (see [Configuration](#configuration)). `tmskipper suggest` lists large git-ignored folders that may need a rule.
+
+**A folder I want backed up was excluded.** Add it to `protectedPaths`, or disable the rule in `rules.disable`. The next scan removes the exclusion TMSkipper had added.
+
+**Undo everything.** Stop the agent first, otherwise it excludes the folders again at the next scan:
+
+```bash
+tmskipper uninstall
+tmskipper reset
+```
+
+or `scripts/uninstall.sh --reset`, which also removes the binary. Exclusions you made by hand or with other tools are never touched.
+
+**Check that a folder is excluded.** `tmutil isexcluded <path>` reads the attribute. To see a real backup, open Time Machine from the menu bar and press <kbd>Cmd</kbd>+<kbd>Shift</kbd>+<kbd>.</kbd> to show hidden folders. Commands such as `tmutil listbackups` need Full Disk Access for the terminal app; TMSkipper itself never does.
+
+**`log show` fails with "too many arguments".** zsh can shadow Apple's `log` with a built-in command. Use the full path: `/usr/bin/log show …`.
+
+**`tmskipper status` says the agent is not loaded, or the executable is missing.** Run `scripts/install.sh` again. Startup errors are written to `~/Library/Logs/TMSkipper/error.log`, and `launchctl print gui/$(id -u)/io.github.manuelminelle.tmskipper` shows launchd's view of the agent.
+
+**"warning: git not found".** The tracked-files safety check needs git: install the Command Line Tools (`xcode-select --install`) or git from Homebrew. Without git the other checks still apply.
+
+**Scans run often while I work.** The agent also starts when any volume is mounted, including disk images and simulator runtimes. A scan takes about a second at low priority, so this is harmless.
+
+**Hidden folders and Spotlight.** At the start of a backup Time Machine asks Spotlight for excluded items, and Spotlight does not index hidden folders such as `.next`. Time Machine also reads the exclusion on each item while copying, and hidden folders excluded by TMSkipper were verified absent from real backups.
+
+**Local snapshots still contain excluded folders.** Time Machine's local snapshots copy the whole volume; exclusions apply to the copy on the backup disk. Local snapshots are deleted automatically after about 24 hours or when space is needed.
+
 ## Uninstall
 
 ```bash
@@ -122,12 +181,9 @@ scripts/uninstall.sh --reset   # stops the agent, removes TMSkipper's exclusions
 
 Without `--reset` the exclusions stay in place. The config file in `~/.config/tmskipper` is kept.
 
-## Development
+## Contributing
 
-```bash
-swift build
-swift test
-```
+Bug reports and new rules are welcome: see [CONTRIBUTING.md](CONTRIBUTING.md). To report a security problem privately, see [SECURITY.md](SECURITY.md).
 
 ## License
 

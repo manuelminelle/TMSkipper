@@ -1,0 +1,52 @@
+name: Bug report
+description: TMSkipper did something wrong or failed.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        If TMSkipper excluded data that cannot be regenerated, or got around a protected path, please report it privately instead: see SECURITY.md.
+        Remove personal paths and project names from anything you paste.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What did you expect, and what happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Create a folder with ...
+        2. Run `tmskipper scan --dry-run`
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Output
+      description: The relevant output of `tmskipper scan --dry-run` and `tmskipper status`.
+      render: text
+  - type: input
+    id: version
+    attributes:
+      label: TMSkipper version
+      description: Output of `tmskipper version`.
+    validations:
+      required: true
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version
+      placeholder: e.g. macOS 26.1
+    validations:
+      required: true
+  - type: textarea
+    id: config
+    attributes:
+      label: Config file
+      description: Your `~/.config/tmskipper/config.json`, if you have one.
+      render: json

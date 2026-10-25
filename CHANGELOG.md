@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- A dry run's summary now says "to exclude" and "to remove" instead of "excluded" and "removed".
+- Documentation for publishing: example output and troubleshooting in the README, CONTRIBUTING.md, SECURITY.md, issue and pull request templates.
+
 ## 0.1.0
 
 First release.
