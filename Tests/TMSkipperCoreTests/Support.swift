@@ -47,11 +47,16 @@ final class Sandbox {
 final class FakeStore: ExclusionStore {
     /// Path → marker (nil for exclusions made by someone else).
     var exclusions: [String: String?] = [:]
+    /// Paths whose exclusion cannot be removed.
+    var failingIncludes: Set<String> = []
 
     func isExcluded(_ url: URL) -> Bool { exclusions[url.fsPath] != nil }
     func marker(of url: URL) -> String? { exclusions[url.fsPath] ?? nil }
     func exclude(_ url: URL, marker: String) throws { exclusions[url.fsPath] = .some(marker) }
-    func include(_ url: URL) throws { exclusions[url.fsPath] = nil }
+    func include(_ url: URL) throws {
+        if failingIncludes.contains(url.fsPath) { throw POSIXError(.EPERM) }
+        exclusions[url.fsPath] = nil
+    }
 
     func excludeByOthers(_ url: URL) { exclusions[url.fsPath] = .some(nil) }
     var excludedPaths: Set<String> { Set(exclusions.keys) }
@@ -64,4 +69,22 @@ struct FakeGit: GitClient {
 
     func hasTrackedFiles(in folder: URL, repository: URL) -> Bool? { tracked.contains(folder.fsPath) }
     func ignoredDirectories(in repository: URL) -> [String]? { ignored[repository.fsPath] ?? [] }
+}
+
+/// Git stand-in that cannot answer, counting how often it is asked.
+final class FailingGit: GitClient {
+    var calls = 0
+
+    func hasTrackedFiles(in folder: URL, repository: URL) -> Bool? {
+        calls += 1
+        return nil
+    }
+
+    func ignoredDirectories(in repository: URL) -> [String]? { nil }
+}
+
+/// Spotlight stand-in: returns `items` as excluded.
+struct FakeIndex: ExclusionIndex {
+    var items: [URL]
+    func excludedItems() -> [URL]? { items }
 }

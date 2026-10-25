@@ -67,6 +67,38 @@ import Testing
         #expect(FileSystem.info(marker) == nil, "git ran the repository's core.fsmonitor program")
     }
 
+    @Test(.enabled(if: Git.locate() != nil))
+    func gitIgnoresTheCallersGitVariables() throws {
+        let sandbox = try Sandbox()
+        let repository = try sandbox.folder("repo")
+        try sandbox.file("repo/build/kept.txt", "tracked")
+        let other = try sandbox.folder("other")
+        try run("git", "-C", repository.fsPath, "init", "-q")
+        try run("git", "-C", repository.fsPath, "add", "build/kept.txt")
+        try run("git", "-C", other.fsPath, "init", "-q")
+        let git = try #require(Git.locate())
+
+        // As in a git hook or an IDE terminal that points GIT_DIR at another repository.
+        setenv("GIT_DIR", other.appending(path: ".git").fsPath, 1)
+        defer { unsetenv("GIT_DIR") }
+
+        #expect(git.hasTrackedFiles(in: sandbox.url("repo/build"), repository: repository) == true)
+        #expect(Git.environment(from: ["GIT_DIR": "/x", "GIT_CONFIG_COUNT": "1", "PATH": "/usr/bin"])
+            == ["PATH": "/usr/bin", "GIT_OPTIONAL_LOCKS": "0", "GIT_TERMINAL_PROMPT": "0", "GIT_PAGER": "cat"])
+    }
+
+    @Test(.enabled(if: Git.locate() != nil))
+    func folderNamesAreNeverPathspecMagic() throws {
+        let sandbox = try Sandbox()
+        let repository = try sandbox.folder("repo")
+        try sandbox.file("repo/:(attr:none)x/build/kept.txt", "tracked")
+        try run("git", "-C", repository.fsPath, "init", "-q")
+        try run("git", "-C", repository.fsPath, "--literal-pathspecs", "add", ":(attr:none)x")
+        let git = try #require(Git.locate())
+
+        #expect(git.hasTrackedFiles(in: sandbox.url("repo/:(attr:none)x/build"), repository: repository) == true)
+    }
+
     private func run(_ arguments: String...) throws {
         let process = Process()
         process.executableURL = URL(filePath: "/usr/bin/env")

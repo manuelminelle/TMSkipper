@@ -372,4 +372,158 @@ import Testing
 
         #expect(suggestions.map(\.url.fsPath) == [sandbox.url("projects/app/models").fsPath])
     }
+
+    // MARK: - Second security review
+
+    @Test func recognisesSecretsWhateverTheirCase() throws {
+        try sandbox.file("projects/a/build.gradle", "")
+        try sandbox.file("projects/a/build/Credentials.json", "{}")
+        try sandbox.file("projects/b/build.gradle", "")
+        try sandbox.file("projects/b/build/signing.PFX", "")
+        try sandbox.file("projects/c/build.gradle", "")
+        try sandbox.file("projects/c/build/vault.kdbx", "")
+
+        let report = scan()
+
+        #expect(Set(report.skipped.map(\.reason)) == ["contains Credentials.json", "contains signing.PFX", "contains vault.kdbx"])
+        #expect(store.excludedPaths.isEmpty)
+    }
+
+    @Test func recognisesMorePrivateKeyFormatsByContent() throws {
+        let keys = [
+            "pgp": "-----BEGIN PGP PRIVATE KEY BLOCK-----\n\nlQOYBF...\n",
+            "bom": "\u{FEFF}-----BEGIN RSA PRIVATE KEY-----\nMIIE...\n",
+            "service": #"{"type": "service_account", "project_id": "p", "private_key": "-----BEGIN PRIVATE KEY-----\nMIIE"}"#,
+            "putty": "PuTTY-User-Key-File-3: ssh-ed25519\n",
+        ]
+        for (name, contents) in keys {
+            try sandbox.file("projects/\(name)/build.gradle", "")
+            try sandbox.file("projects/\(name)/build/deploy", contents)
+        }
+        // Maven signs artifacts with public .asc signatures: not a secret.
+        try sandbox.file("projects/lib/pom.xml", "")
+        try sandbox.file("projects/lib/target/lib-1.0.jar.asc", "-----BEGIN PGP SIGNATURE-----\n")
+
+        let report = scan()
+
+        #expect(report.skipped.count == keys.count)
+        #expect(Set(report.skipped.map(\.reason)) == ["contains deploy"])
+        #expect(store.excludedPaths == [sandbox.url("projects/lib/target").fsPath])
+    }
+
+    @Test func asksGitOnceForARepositoryItCannotRead() throws {
+        try sandbox.folder("projects/app/.git")
+        try sandbox.file("projects/app/build.gradle", "")
+        try sandbox.folder("projects/app/build")
+        try sandbox.folder("projects/app/.gradle")
+        let git = FailingGit()
+
+        let report = FolderScanner(config: sandbox.config(), store: store, git: git).scan(apply: true)
+
+        #expect(git.calls == 1)
+        #expect(report.skipped.map(\.reason) == ["git could not check for tracked files", "git could not check for tracked files"])
+        #expect(store.excludedPaths.isEmpty)
+    }
+
+    @Test func stopsAskingGitPastTheTimeBudget() throws {
+        try sandbox.folder("projects/app/.git")
+        try sandbox.file("projects/app/package.json", "{}")
+        try sandbox.folder("projects/app/node_modules")
+        let git = FailingGit()
+        var scanner = FolderScanner(config: sandbox.config(), store: store, git: git)
+        scanner.gitTimeBudget = 0
+
+        let report = scanner.scan(apply: true)
+
+        #expect(git.calls == 0)
+        #expect(report.skipped.map(\.reason) == ["time limit for git checks reached in this scan"])
+        #expect(store.excludedPaths.isEmpty)
+    }
+
+    @Test func removesOwnExclusionsCopiedOutOfTheRoots() throws {
+        try sandbox.file("projects/site/astro.config.mjs", "")
+        let dist = try sandbox.folder("projects/site/dist")
+        let copy = try sandbox.folder("deliveries/site-v3")
+        let manual = try sandbox.folder("deliveries/raw-footage")
+        _ = scan()
+        // `cp -R dist deliveries/site-v3` copies the exclusion and the marker.
+        store.exclusions[copy.fsPath] = .some("astro-dist")
+        store.excludeByOthers(manual)
+        let index = FakeIndex(items: [dist, copy, manual])
+        let scanner = FolderScanner(config: sandbox.config(), store: store, git: FakeGit(), index: index)
+
+        #expect(Set(scanner.findOwned().kept.map(\.url.fsPath)) == [dist.fsPath, copy.fsPath])
+        let report = scanner.scan(apply: true)
+
+        #expect(report.removed.map(\.url.fsPath) == [copy.fsPath])
+        #expect(report.removed.first?.reason == "outside the roots: copied or moved there")
+        #expect(store.excludedPaths == [dist.fsPath, manual.fsPath])
+    }
+
+    @Test func neverTreatsExclusionsInsideARootAsOrphans() throws {
+        try sandbox.folder("real/web")
+        try sandbox.folder("real/cache")
+        try FileManager.default.createSymbolicLink(at: sandbox.url("link"), withDestinationURL: sandbox.url("real"))
+        let config = Config(roots: [sandbox.url("link"), sandbox.url("UPPER")], rules: Rule.defaults, cacheDirTagEnabled: true,
+                            guardedPaths: [sandbox.url("link/cache")])
+        let scanner = FolderScanner(config: config, store: store, git: FakeGit())
+
+        // Spotlight names them by their real path and real case.
+        #expect(scanner.isKnownLocation(URL(filePath: try #require(FileSystem.realPath(sandbox.url("real/web"))))))
+        #expect(scanner.isKnownLocation(sandbox.url("upper/web/node_modules")))
+        #expect(scanner.isKnownLocation(sandbox.url("real/cache")))
+        #expect(!scanner.isKnownLocation(sandbox.url("deliveries/web")))
+    }
+
+    @Test func removesOwnExclusionsLeftInARemovedRoot() throws {
+        try sandbox.file("all/old/package.json", "{}")
+        let old = try sandbox.folder("all/old/node_modules")
+        try sandbox.file("all/keep/web/package.json", "{}")
+        let kept = try sandbox.folder("all/keep/web/node_modules")
+        let wide = Config(roots: [sandbox.url("all")], rules: Rule.defaults, cacheDirTagEnabled: true, guardedPaths: [])
+        _ = FolderScanner(config: wide, store: store, git: FakeGit()).scan(apply: true)
+        #expect(store.excludedPaths == [old.fsPath, kept.fsPath])
+        // The config now lists a narrower root inside the former one.
+        let narrow = Config(roots: [sandbox.url("all/keep")], rules: Rule.defaults, cacheDirTagEnabled: true, guardedPaths: [])
+        let scanner = FolderScanner(config: narrow, store: store, git: FakeGit(), previous: ScanLocations(wide))
+
+        #expect(Set(scanner.findOwned().kept.map(\.url.fsPath)) == [old.fsPath, kept.fsPath])
+        let report = scanner.scan(apply: true)
+
+        #expect(report.removed.map(\.url.fsPath) == [old.fsPath])
+        #expect(report.removed.first?.reason == "its root was removed from the config")
+        #expect(store.excludedPaths == [kept.fsPath])
+        #expect(scanner.locations(after: report) == ScanLocations(narrow))
+    }
+
+    @Test func removesOwnExclusionsOfFormerGuardedPaths() throws {
+        try sandbox.folder("projects")
+        let derivedData = try sandbox.folder("library/DerivedData")
+        let insideRoot = try sandbox.folder("projects/cache")
+        let guarded = sandbox.config(guarded: ["library/DerivedData", "projects/cache"])
+        _ = scan(guarded)
+        #expect(store.excludedPaths == [derivedData.fsPath, insideRoot.fsPath])
+        let scanner = FolderScanner(config: sandbox.config(), store: store, git: FakeGit(), previous: ScanLocations(guarded))
+
+        let report = scanner.scan(apply: true)
+
+        #expect(Set(report.removed.map(\.url.fsPath)) == [derivedData.fsPath, insideRoot.fsPath])
+        #expect(Set(report.removed.map(\.reason)) == ["no longer a guarded path"])
+        #expect(store.excludedPaths.isEmpty)
+    }
+
+    @Test func remembersAFormerRootUntilItsExclusionsAreRemoved() throws {
+        try sandbox.folder("projects")
+        try sandbox.file("old/web/package.json", "{}")
+        let modules = try sandbox.folder("old/web/node_modules")
+        store.exclusions[modules.fsPath] = .some("node-modules")
+        store.failingIncludes = [modules.fsPath]
+        let previous = ScanLocations(roots: [sandbox.url("old").fsPath, sandbox.url("projects").fsPath])
+        let scanner = FolderScanner(config: sandbox.config(), store: store, git: FakeGit(), previous: previous)
+
+        let report = scanner.scan(apply: true)
+
+        #expect(report.errors.count == 1)
+        #expect(scanner.locations(after: report).roots == [sandbox.url("projects").fsPath, sandbox.url("old").fsPath])
+    }
 }

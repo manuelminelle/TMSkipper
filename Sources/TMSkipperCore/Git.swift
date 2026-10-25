@@ -45,38 +45,38 @@ public struct Git: GitClient {
             .map { String($0.dropLast()) }
     }
 
-    /// Settings that override the repository's own configuration. A folder under the roots can be a
-    /// downloaded `.git` with a hostile config: `core.fsmonitor` names a program that git runs on
-    /// `ls-files` (verified), and TMSkipper runs git unattended. Command-line settings take precedence.
     /// Seconds after which a git call is killed and its answer treated as unknown.
     static let timeout: TimeInterval = 60
 
+    /// Settings that override the repository's own configuration. A folder under the roots can be a
+    /// downloaded `.git` with a hostile config: `core.fsmonitor` names a program that git runs on
+    /// `ls-files` (verified), and TMSkipper runs git unattended. Command-line settings take precedence.
+    /// `--literal-pathspecs` keeps a folder name such as `:(attr:x)build` from being read as pathspec
+    /// magic, which made `ls-files` miss tracked files (verified).
     static let hardening = [
+        "--literal-pathspecs",
         "-c", "core.fsmonitor=false",
         "-c", "core.untrackedCache=false",
         "-c", "core.hooksPath=/dev/null",
     ]
 
-    private static func run(_ executable: URL, _ arguments: [String]) -> (status: Int32, data: Data)? {
-        let process = Process()
-        process.executableURL = executable
-        process.arguments = executable.lastPathComponent == "git" ? hardening + arguments : arguments
-        var environment = ProcessInfo.processInfo.environment
+    /// The caller's environment without git's own variables. `GIT_DIR`, `GIT_WORK_TREE`,
+    /// `GIT_INDEX_FILE` or `GIT_CONFIG_*`, set by a hook or an IDE terminal, point git at another
+    /// repository or configuration, and its empty answer then reads as "no tracked files" (verified).
+    static func environment(from base: [String: String]) -> [String: String] {
+        var environment = base.filter { !$0.key.hasPrefix("GIT_") }
         environment["GIT_OPTIONAL_LOCKS"] = "0"
         environment["GIT_TERMINAL_PROMPT"] = "0"
         environment["GIT_PAGER"] = "cat"
-        process.environment = environment
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = FileHandle.nullDevice
-        do { try process.run() } catch { return nil }
-        // A git that never returns (huge repository, broken file system) must not stall the agent.
-        let pid = process.processIdentifier
-        let watchdog = DispatchWorkItem { kill(pid, SIGKILL) }
-        DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: watchdog)
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        watchdog.cancel()
-        return (process.terminationStatus, data)
+        return environment
+    }
+
+    private static func run(_ executable: URL, _ arguments: [String]) -> (status: Int32, data: Data)? {
+        Subprocess.run(
+            executable,
+            executable.lastPathComponent == "git" ? hardening + arguments : arguments,
+            environment: environment(from: ProcessInfo.processInfo.environment),
+            timeout: timeout
+        )
     }
 }

@@ -23,6 +23,8 @@ public struct ScanReport: Sendable {
     public var errors: [String] = []
     public var directoriesVisited = 0
     public var duration: TimeInterval = 0
+    /// Former roots and guarded paths where an exclusion could not be removed: kept for the next scan.
+    var unfinishedLocations = ScanLocations()
 }
 
 /// Walks the roots, applies the rules and keeps the guarded paths excluded.
@@ -34,22 +36,51 @@ public struct FolderScanner {
     public let store: any ExclusionStore
     /// nil when git is not available: the tracked-files check is then skipped.
     public let git: (any GitClient)?
+    /// Finds TMSkipper's exclusions on folders copied or moved out of the roots; nil skips that search.
+    public let index: (any ExclusionIndex)?
+    /// Roots and guarded paths of an earlier scan that the config no longer lists.
+    public let formerRoots: [URL]
+    public let formerGuardedPaths: [URL]
+    /// Total time the git checks of one scan may take. Past it, the remaining candidates inside
+    /// repositories are skipped, so the agent's scan ends before its 15-minute limit.
+    public var gitTimeBudget: TimeInterval = 5 * 60
 
-    public init(config: Config, store: any ExclusionStore = SystemExclusionStore(), git: (any GitClient)?) {
+    /// `previous` is what the last applied scan covered (see `locations(after:)`).
+    public init(
+        config: Config, store: any ExclusionStore = SystemExclusionStore(), git: (any GitClient)?,
+        index: (any ExclusionIndex)? = nil, previous: ScanLocations? = nil
+    ) {
         self.config = config
         self.store = store
         self.git = git
+        self.index = index
+        let roots = config.roots.map(\.fsPath)
+        formerRoots = (previous?.roots ?? [])
+            .filter { former in !roots.contains { FileSystem.path(former, isInside: $0) } }
+            .map { URL(filePath: $0) }
+        let guarded = Set(config.guardedPaths.map(\.fsPath))
+        formerGuardedPaths = (previous?.guardedPaths ?? []).filter { !guarded.contains($0) }.map { URL(filePath: $0) }
+    }
+
+    /// What to save after an applied scan: the current roots and guarded paths, plus the former ones
+    /// where an exclusion could not be removed, so the next scan tries again.
+    public func locations(after report: ScanReport) -> ScanLocations {
+        var locations = ScanLocations(config)
+        locations.roots += report.unfinishedLocations.roots.filter { !locations.roots.contains($0) }
+        locations.guardedPaths += report.unfinishedLocations.guardedPaths.filter { !locations.guardedPaths.contains($0) }
+        return locations
     }
 
     /// Applies the rules (or only reports, when `apply` is false).
     public func scan(apply: Bool) -> ScanReport {
         let start = Date()
         var report = ScanReport(applied: apply)
+        let checks = GitChecks()
         for root in config.roots {
             traverse(
                 root: root, report: &report,
                 onCandidate: { url, ruleID, repository, report in
-                    handleCandidate(url, ruleID: ruleID, repository: repository, apply: apply, report: &report)
+                    handleCandidate(url, ruleID: ruleID, repository: repository, checks: checks, apply: apply, report: &report)
                 },
                 onExcluded: { url, report in
                     guard let marker = store.marker(of: url) else { return }
@@ -58,6 +89,7 @@ public struct FolderScanner {
             )
         }
         guardPaths(apply: apply, report: &report)
+        removeOrphans(apply: apply, report: &report)
         report.duration = Date().timeIntervalSince(start)
         return report
     }
@@ -80,6 +112,9 @@ public struct FolderScanner {
         }
         for url in config.guardedPaths where !report.kept.contains(where: { $0.url.fsPath == url.fsPath }) {
             collect(url, &report)
+        }
+        for orphan in orphans(report: &report) where !report.kept.contains(where: { $0.url.fsPath == orphan.item.url.fsPath }) {
+            report.kept.append(.init(url: orphan.item.url, ruleID: orphan.item.ruleID))
         }
         report.duration = Date().timeIntervalSince(start)
         return report
@@ -155,9 +190,11 @@ public struct FolderScanner {
         return nil
     }
 
+    /// `skipping` lists folders not to enter: current roots inside a former root.
     private func traverse(
         root: URL,
         report: inout ScanReport,
+        skipping: [URL] = [],
         onCandidate: (URL, String, URL?, inout ScanReport) -> Void,
         onExcluded: (URL, inout ScanReport) -> Void,
         onDirectory: (URL, Set<String>) -> Void = { _, _ in }
@@ -169,7 +206,7 @@ public struct FolderScanner {
         // Nothing inside an excluded root is backed up anyway.
         if store.isExcludedIncludingAncestors(root) { return }
 
-        var handled = Set<String>()
+        var handled = Set<String>(skipping.map(\.fsPath))
         // A root can lie inside a repository: the tracked-files check must still find it.
         var stack: [(directory: URL, repository: URL?)] = [(root, Self.enclosingRepository(of: root))]
         while let (directory, enclosingRepository) = stack.popLast() {
@@ -224,7 +261,9 @@ public struct FolderScanner {
 
     // MARK: - Decisions
 
-    private func handleCandidate(_ candidate: URL, ruleID: String, repository: URL?, apply: Bool, report: inout ScanReport) {
+    private func handleCandidate(
+        _ candidate: URL, ruleID: String, repository: URL?, checks: GitChecks, apply: Bool, report: inout ScanReport
+    ) {
         let item = ScanReport.Item(url: candidate, ruleID: ruleID)
         if store.isExcluded(candidate) {
             if let marker = store.marker(of: candidate) {
@@ -238,7 +277,7 @@ public struct FolderScanner {
             report.skipped.append(.init(url: candidate, ruleID: ruleID, reason: "in protectedPaths"))
             return
         }
-        if let reason = safetyIssue(candidate, repository: repository) {
+        if let reason = safetyIssue(candidate, repository: repository, checks: checks) {
             report.skipped.append(.init(url: candidate, ruleID: ruleID, reason: reason))
             return
         }
@@ -253,8 +292,12 @@ public struct FolderScanner {
 
     /// An excluded folder carrying TMSkipper's marker that no rule matched at its position.
     private func reconcile(_ url: URL, marker: String, apply: Bool, report: inout ScanReport) {
-        // Guarded paths inside a root are handled by guardPaths.
-        if marker == Rule.guardedMarker { return }
+        if marker == Rule.guardedMarker {
+            // Guarded paths inside a root are handled by guardPaths.
+            if config.guardedPaths.contains(where: { $0.fsPath == url.fsPath }) { return }
+            remove(url, ruleID: marker, reason: "no longer a guarded path", apply: apply, report: &report)
+            return
+        }
         if stillMatches(url, ruleID: marker) {
             revalidateOwned(url, marker: marker, apply: apply, report: &report)
         } else {
@@ -274,14 +317,17 @@ public struct FolderScanner {
         }
     }
 
-    private func remove(_ url: URL, ruleID: String, reason: String, apply: Bool, report: inout ScanReport) {
+    /// False if the exclusion could not be removed.
+    @discardableResult
+    private func remove(_ url: URL, ruleID: String, reason: String, apply: Bool, report: inout ScanReport) -> Bool {
         if apply {
             do { try store.include(url) } catch {
                 report.errors.append("cannot remove the exclusion of \(url.fsPath): \(error.localizedDescription)")
-                return
+                return false
             }
         }
         report.removed.append(.init(url: url, ruleID: ruleID, reason: reason))
+        return true
     }
 
     private func stillMatches(_ url: URL, ruleID: String) -> Bool {
@@ -301,20 +347,104 @@ public struct FolderScanner {
         return RuleMatcher.sentinelsMatch(rule, in: base, names: Set(entries.map(\.name)))
     }
 
-    private func safetyIssue(_ candidate: URL, repository: URL?) -> String? {
+    private func safetyIssue(_ candidate: URL, repository: URL?, checks: GitChecks) -> String? {
         guard let info = FileSystem.info(candidate), info.isDirectory else {
             return "not a folder (or a symbolic link)"
         }
         if info.isDataless { return "iCloud placeholder, not downloaded" }
         if let item = RuleMatcher.protectedItem(in: candidate) { return "contains \(item)" }
         if let repository, let git {
-            switch git.hasTrackedFiles(in: candidate, repository: repository) {
+            if checks.failedRepositories.contains(repository.fsPath) { return "git could not check for tracked files" }
+            if checks.elapsed >= gitTimeBudget { return "time limit for git checks reached in this scan" }
+            let start = Date()
+            let tracked = git.hasTrackedFiles(in: candidate, repository: repository)
+            checks.elapsed += Date().timeIntervalSince(start)
+            switch tracked {
             case true?: return "contains files tracked by git"
-            case nil: return "git could not check for tracked files"
+            case nil:
+                checks.failedRepositories.insert(repository.fsPath)
+                return "git could not check for tracked files"
             case false?: break
             }
         }
         return nil
+    }
+
+    // MARK: - Orphans
+
+    /// An owned exclusion that the walk of the roots cannot reach, with the former root or guarded
+    /// path it was found in, if any.
+    private struct Orphan {
+        var item: ScanReport.Item
+        var formerRoot: String?
+        var formerGuardedPath: String?
+    }
+
+    /// Removes the orphans: no rule checks them any more, and a copy or move out of the roots
+    /// (a `dist` delivered elsewhere) must be backed up.
+    private func removeOrphans(apply: Bool, report: inout ScanReport) {
+        let current = Set((report.excluded + report.kept).map(\.url.fsPath))
+        for orphan in orphans(report: &report) where !current.contains(orphan.item.url.fsPath) {
+            let item = orphan.item
+            guard !remove(item.url, ruleID: item.ruleID, reason: item.reason ?? "", apply: apply, report: &report) else { continue }
+            if let root = orphan.formerRoot, !report.unfinishedLocations.roots.contains(root) {
+                report.unfinishedLocations.roots.append(root)
+            }
+            if let path = orphan.formerGuardedPath { report.unfinishedLocations.guardedPaths.append(path) }
+        }
+    }
+
+    /// TMSkipper's exclusions in a former root or guarded path, and those that Spotlight finds
+    /// outside the roots and the guarded paths.
+    private func orphans(report: inout ScanReport) -> [Orphan] {
+        var orphans: [Orphan] = []
+        var seen = Set<String>()
+        func add(_ url: URL, reason: String, formerRoot: String? = nil, formerGuardedPath: String? = nil) {
+            guard store.isExcluded(url), let marker = store.marker(of: url) else { return }
+            // The same folder can come from a former root and from Spotlight under two names.
+            let key = FileSystem.realPath(url) ?? url.fsPath
+            guard !seen.contains(key), !isKnownLocation(url) else { return }
+            seen.insert(key)
+            orphans.append(Orphan(
+                item: .init(url: url, ruleID: marker, reason: reason), formerRoot: formerRoot, formerGuardedPath: formerGuardedPath
+            ))
+        }
+
+        for root in formerRoots where FileSystem.info(root)?.isDirectory == true {
+            let errors = report.errors.count
+            let reason = "its root was removed from the config"
+            traverse(
+                root: root, report: &report, skipping: config.roots,
+                onCandidate: { url, _, _, _ in add(url, reason: reason, formerRoot: root.fsPath) },
+                onExcluded: { url, _ in add(url, reason: reason, formerRoot: root.fsPath) }
+            )
+            // Part of it could not be read: look again next time.
+            if report.errors.count > errors { report.unfinishedLocations.roots.append(root.fsPath) }
+        }
+        for url in formerGuardedPaths where store.marker(of: url) == Rule.guardedMarker {
+            add(url, reason: "no longer a guarded path", formerGuardedPath: url.fsPath)
+        }
+        for url in index?.excludedItems() ?? [] {
+            guard let info = FileSystem.info(url), !info.isSymbolicLink else { continue }
+            add(url, reason: "outside the roots: copied or moved there")
+        }
+        return orphans
+    }
+
+    /// True if `url` is inside a root or is a guarded path, comparing every way of naming them:
+    /// Spotlight reports real paths in their real case, while a root may be written in another
+    /// case or reached through a symbolic link. Such an exclusion is never treated as an orphan.
+    func isKnownLocation(_ url: URL) -> Bool {
+        let paths = Self.names(of: url)
+        let roots = config.roots.flatMap(Self.names)
+        if paths.contains(where: { path in roots.contains { FileSystem.path(path, isInside: $0) } }) { return true }
+        let guarded = Set(config.guardedPaths.flatMap(Self.names).map { $0.lowercased() })
+        return paths.contains { guarded.contains($0.lowercased()) }
+    }
+
+    /// The path as written, with symbolic links resolved by Foundation (which drops `/private`) and by `realpath`.
+    private static func names(of url: URL) -> [String] {
+        [url.fsPath, url.resolvingSymlinksInPath().fsPath] + (FileSystem.realPath(url).map { [$0] } ?? [])
     }
 
     // MARK: - Guarded paths
@@ -353,4 +483,12 @@ public struct FolderScanner {
             report.excluded.append(item)
         }
     }
+}
+
+/// Per-scan state of the tracked-files check. A repository git could not answer for is not asked
+/// again: a hostile one (for example with a named pipe as its index, which blocks git until it is
+/// killed) would otherwise cost the full git timeout for every candidate it holds (verified).
+private final class GitChecks {
+    var failedRepositories = Set<String>()
+    var elapsed: TimeInterval = 0
 }

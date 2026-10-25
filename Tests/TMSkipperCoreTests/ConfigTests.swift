@@ -106,6 +106,23 @@ import Testing
         #expect(!config.isProtected(URL(filePath: "/Volumes/Data/Other")))
     }
 
+    @Test func protectedPathsMatchTheRealLocationOfARoot() throws {
+        let sandbox = try Sandbox()
+        let delivery = try sandbox.folder("SSD/work/Client/delivery/build")
+        try FileManager.default.createSymbolicLink(at: sandbox.url("work"), withDestinationURL: sandbox.url("SSD/work"))
+        // The root is ~/work (a link); the protected path is written with the real location.
+        let config = try Config.resolve(decode(#"{"protectedPaths": ["\#(sandbox.url("SSD/work/Client/delivery").fsPath)"]}"#))
+
+        #expect(config.isProtected(delivery))
+        #expect(config.isProtected(sandbox.url("work/Client/delivery/build")))
+        #expect(!config.isProtected(sandbox.url("work/Client/sources")))
+    }
+
+    @Test func terminalOutputCannotCarryEscapesOrReorderText() {
+        let name = "a\u{1B}]52;c;bWFsd2FyZQ==\u{07}b\u{202E}gpj.exe\u{2066}c 👨‍👩‍👧"
+        #expect(name.terminalSafe == "a?]52;c;bWFsd2FyZQ==?b?gpj.exe?c 👨‍👩‍👧")
+    }
+
     @Test func launchAgentSchedule() {
         let plist = LaunchAgent.propertyList(
             executable: URL(filePath: "/usr/local/bin/tmskipper"), everyHours: 6, config: URL(filePath: "/custom/config.json")

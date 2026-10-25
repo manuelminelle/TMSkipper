@@ -23,11 +23,14 @@ public struct Config: Sendable {
 
     /// True if excluding `url` would exclude a protected path: `url` is one, lies inside one or contains one.
     /// Case-insensitive, as APFS is by default; on a case-sensitive volume this only protects more.
+    /// The real location counts too: under a root reached through a symbolic link (`~/work` pointing
+    /// to `/Volumes/SSD/work`), a protected path written with the real location must still match.
     public func isProtected(_ url: URL) -> Bool {
-        let path = url.fsPath.lowercased()
+        let paths = Set([url.fsPath, url.resolvingSymlinksInPath().fsPath])
         return protectedPaths.contains { protected in
-            let protectedPath = protected.fsPath.lowercased()
-            return path == protectedPath || path.hasPrefix(protectedPath + "/") || protectedPath.hasPrefix(path + "/")
+            paths.contains { path in
+                FileSystem.path(path, isInside: protected.fsPath) || FileSystem.path(protected.fsPath, isInside: path)
+            }
         }
     }
 

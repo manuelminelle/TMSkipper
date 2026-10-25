@@ -34,11 +34,9 @@ func display(_ url: URL) -> String {
     return sanitize(path == home || path.hasPrefix(home + "/") ? "~" + path.dropFirst(home.count) : path)
 }
 
-/// File names come from untrusted folders: control characters (terminal escape sequences) become "?".
+/// File names come from untrusted folders: see `String.terminalSafe`.
 func sanitize(_ text: String) -> String {
-    String(String.UnicodeScalarView(text.unicodeScalars.map { scalar in
-        scalar.properties.generalCategory == .control ? "?" : scalar
-    }))
+    text.terminalSafe
 }
 
 func printError(_ message: String) {
@@ -85,7 +83,7 @@ func makeScanner(_ config: Config, quiet: Bool) -> FolderScanner {
         Log.scan.notice("git not found: the tracked-files safety check is disabled")
         if !quiet { printError("warning: git not found, the tracked-files safety check is disabled") }
     }
-    return FolderScanner(config: config, git: git)
+    return FolderScanner(config: config, git: git, index: SpotlightIndex(), previous: ScanLocations.load())
 }
 
 func ruleLabel(_ ruleID: String) -> String {
@@ -154,6 +152,9 @@ func scan(_ options: Options) -> Int32 {
         for error in report.errors { Log.scan.error("\(error, privacy: .public)") }
         Log.scan.notice("\(summary(report), privacy: .public)")
         do { try LastScan(report).save() } catch { printError("cannot save the scan summary: \(error.localizedDescription)") }
+        do { try scanner.locations(after: report).save() } catch {
+            printError("cannot save the scanned locations: \(error.localizedDescription)")
+        }
     }
 
     if quiet {
@@ -271,7 +272,7 @@ func status() -> Int32 {
         let roots = config.roots.map(display).joined(separator: ", ")
         print("Roots:      \(roots.isEmpty ? "none: set \"roots\" in the config file" : roots)")
     } catch {
-        print("Config:     ERROR \(error)")
+        print("Config:     ERROR \(sanitize(String(describing: error)))")
     }
 
     if let last = LastScan.load() {
@@ -279,7 +280,7 @@ func status() -> Int32 {
         let ago = last.date.formatted(.relative(presentation: .named))
         print("Last scan:  \(date) (\(ago)), \(String(format: "%.2f", last.duration)) s, \(last.directoriesVisited) folders")
         print("            \(last.excluded) excluded, \(last.removed) removed, \(last.skipped) skipped, \(last.kept) kept, \(last.errors.count) errors")
-        last.errors.forEach { print("            error: \($0)") }
+        last.errors.forEach { print("            error: \(sanitize($0))") }
     } else {
         print("Last scan:  never")
     }

@@ -19,6 +19,47 @@ public enum Log {
     public static let scan = Logger(subsystem: Identity.identifier, category: "scan")
 }
 
+/// Runs a helper program (git, mdfind) and collects its standard output.
+public enum Subprocess {
+    /// The exit status and output, or nil if the program could not start. After `timeout` seconds
+    /// the program is killed: one that never returns (huge repository, broken file system, a named
+    /// pipe where a file should be) must not stall the agent.
+    public static func run(
+        _ executable: URL, _ arguments: [String], environment: [String: String]? = nil, timeout: TimeInterval
+    ) -> (status: Int32, data: Data)? {
+        let process = Process()
+        process.executableURL = executable
+        process.arguments = arguments
+        if let environment { process.environment = environment }
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        do { try process.run() } catch { return nil }
+        let pid = process.processIdentifier
+        let watchdog = DispatchWorkItem { kill(pid, SIGKILL) }
+        DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: watchdog)
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        watchdog.cancel()
+        return (process.terminationStatus, data)
+    }
+}
+
+extension String {
+    /// The text with control characters (terminal escape sequences) and invisible format characters
+    /// (bidirectional overrides, which reorder what is shown) replaced by "?". File names come from
+    /// untrusted folders. The zero-width joiner of emoji sequences is kept: it cannot reorder text.
+    public var terminalSafe: String {
+        String(String.UnicodeScalarView(unicodeScalars.map { scalar -> Unicode.Scalar in
+            switch scalar.properties.generalCategory {
+            case .control: "?"
+            case .format: scalar == "\u{200D}" ? scalar : "?"
+            default: scalar
+            }
+        }))
+    }
+}
+
 /// A non-blocking exclusive lock, so a scheduled scan and a manual one never run together.
 public final class ScanLock {
     private let descriptor: Int32
@@ -79,5 +120,36 @@ public struct LastScan: Codable, Sendable {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         return try? decoder.decode(LastScan.self, from: data)
+    }
+}
+
+/// The roots and guarded paths of the last applied scan. When the config stops listing one, the
+/// next scan still finds the exclusions TMSkipper left there and removes them, and `list` and
+/// `reset` still see them.
+public struct ScanLocations: Codable, Sendable, Equatable {
+    public var roots: [String]
+    public var guardedPaths: [String]
+
+    public init(roots: [String] = [], guardedPaths: [String] = []) {
+        self.roots = roots
+        self.guardedPaths = guardedPaths
+    }
+
+    public init(_ config: Config) {
+        self.init(roots: config.roots.map(\.fsPath), guardedPaths: config.guardedPaths.map(\.fsPath))
+    }
+
+    public static var fileURL: URL { Identity.supportDirectory.appending(path: "locations.json") }
+
+    public func save() throws {
+        try FileManager.default.createDirectory(at: Identity.supportDirectory, withIntermediateDirectories: true)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+        try encoder.encode(self).write(to: Self.fileURL, options: .atomic)
+    }
+
+    public static func load() -> ScanLocations? {
+        guard let data = try? Data(contentsOf: fileURL) else { return nil }
+        return try? JSONDecoder().decode(ScanLocations.self, from: data)
     }
 }

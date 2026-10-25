@@ -6,12 +6,23 @@ enum RuleMatcher {
     static let cacheDirTagSignature = "Signature: 8a477f597d28d172789f06886806bc55"
 
     /// Names that must never end up excluded: if a candidate holds one at its top level, it is skipped.
-    /// `.git` keeps a whole repository (for example one with a committed CACHEDIR.TAG) in the backup.
+    /// Matched ignoring case (`Credentials.json`, `KEY.PEM`). `.git` keeps a whole repository (for
+    /// example one with a committed CACHEDIR.TAG) in the backup. `*.asc` is not listed: Maven signs
+    /// its artifacts into `target` with public `.asc` signatures, and armoured private keys are
+    /// recognised by content.
     static let protectedPatterns = [
-        ".git", ".env*", "*.p8", "*.p12", "*.pem", "*.key", "*.jks", "*.keystore",
-        "*.mobileprovision", "*.cer", "id_rsa*", "id_ed25519*", "id_ecdsa*",
+        ".git", ".env*", "*.p8", "*.p12", "*.pfx", "*.pem", "*.key", "*.ppk", "*.jks", "*.keystore",
+        "*.mobileprovision", "*.cer", "id_rsa*", "id_dsa*", "id_ed25519*", "id_ecdsa*",
+        "*.gpg", "*.kdbx", "*.keychain", "*.keychain-db",
         "gradle.properties", ".npmrc", ".netrc", "credentials*", "secrets*",
     ]
+
+    /// Bytes read from the start of each top-level file when looking for a private key.
+    static let keySearchBytes = 4096
+
+    /// PEM, OpenSSH and PGP armour of a private key ("-----BEGIN … PRIVATE KEY-----",
+    /// "-----BEGIN PGP PRIVATE KEY BLOCK-----"), wherever it appears in the bytes read.
+    nonisolated(unsafe) static let privateKeyArmor = #/-----BEGIN [A-Z0-9 ]*PRIVATE KEY( BLOCK)?-----/#
 
     /// True if one of the rule's sentinels matches in `base`, whose entry names are `names`.
     static func sentinelsMatch(_ rule: Rule, in base: URL, names: Set<String>) -> Bool {
@@ -56,7 +67,7 @@ enum RuleMatcher {
     static func protectedItem(in directory: URL) -> String? {
         guard let entries = try? FileSystem.entries(of: directory) else { return "(unreadable folder)" }
         if let byName = entries.first(where: { entry in
-            protectedPatterns.contains { FileSystem.matches(entry.name, pattern: $0) }
+            protectedPatterns.contains { FileSystem.matches(entry.name, pattern: $0, ignoringCase: true) }
         }) {
             return byName.name
         }
@@ -64,14 +75,15 @@ enum RuleMatcher {
         return entries.first { !$0.isDirectory && !$0.isSymbolicLink && isPrivateKey($0.url) }?.name
     }
 
-    /// True if the file starts like a PEM or OpenSSH private key ("-----BEGIN … PRIVATE KEY-----").
+    /// True if the file holds a private key in its first bytes: PEM, OpenSSH or PGP armour, also inside
+    /// JSON (a Google Cloud service-account key) or after a byte-order mark, or a PuTTY key.
     /// A placeholder whose content is in iCloud counts as a key: it cannot be read without downloading it.
     /// Named pipes, sockets and devices are never opened.
     static func isPrivateKey(_ url: URL) -> Bool {
         guard let info = FileSystem.info(url), info.isRegularFile else { return false }
         if info.isDataless { return true }
-        guard let data = FileSystem.readPrefix(of: url, maxBytes: 64) else { return false }
-        let prefix = String(decoding: data, as: UTF8.self)
-        return prefix.hasPrefix("-----BEGIN") && prefix.contains("PRIVATE KEY-----")
+        guard let data = FileSystem.readPrefix(of: url, maxBytes: keySearchBytes) else { return false }
+        let text = String(decoding: data, as: UTF8.self)
+        return text.hasPrefix("PuTTY-User-Key-File-") || text.contains(privateKeyArmor)
     }
 }

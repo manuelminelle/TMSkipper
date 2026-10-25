@@ -80,13 +80,13 @@ Known gap: a folder recreated between the last scan and the moment the disk is m
 
 A candidate that matches a rule is still skipped when:
 
-1. it contains secrets or credentials at its top level (`.env*`, `*.p8`, `*.p12`, `*.pem`, `*.key`, `*.jks`, `*.keystore`, `gradle.properties`, …);
+1. it contains secrets or credentials at its top level (`.env*`, `*.p8`, `*.p12`, `*.pfx`, `*.pem`, `*.key`, `*.ppk`, `*.jks`, `*.keystore`, `*.kdbx`, `*.keychain-db`, `gradle.properties`, …), matched in any letter case;
 2. it contains files tracked by git: a committed `build/` or `dist/` is intentional and must be backed up;
 3. it is a symbolic link, or an iCloud placeholder (dataless) that reading would download.
 
 The tool never descends into `.git`, into symbolic links, or into folders that are already excluded.
 
-Private keys are often saved under custom names (`vps-root`, `deploy`), so name patterns are not enough: any top-level file starting with `-----BEGIN … PRIVATE KEY-----` also blocks the exclusion.
+Private keys are often saved under custom names (`vps-root`, `deploy`), so name patterns are not enough: any top-level file whose first 4 KB hold `-----BEGIN … PRIVATE KEY-----` or `-----BEGIN PGP PRIVATE KEY BLOCK-----` (also inside JSON, as in a Google Cloud service-account key, or after a byte-order mark), or that starts like a PuTTY key, also blocks the exclusion. `*.asc` is deliberately not a name pattern: Maven writes public `.asc` signatures into `target`.
 
 Credential stores are always protected and cannot be unprotected from the config: `~/.ssh`, `~/.gnupg`, `~/.aws`, `~/.azure`, `~/.kube`, `~/.docker`, `~/.config/gcloud`, `~/.password-store`, `~/.netrc`, `~/Library/Keychains`. A folder that contains one of them (for example `~/.config`) cannot be excluded either.
 
@@ -103,6 +103,8 @@ Every exclusion made by TMSkipper also gets a second extended attribute, `io.git
 - It moves and disappears with the folder, so it can never drift out of sync like a separate registry file.
 - `list` and `reset` find TMSkipper's exclusions by scanning for the marker, and never touch exclusions made by hand or by other apps.
 - When a rule stops matching (sentinel removed, rule disabled), the next scan removes the exclusion it had added.
+- The marker also travels with copies: `cp -R`, `ditto` and `mv` carry both attributes along (verified), so a `dist` copied out as a delivery would stay excluded where no scan looks. Each scan asks Spotlight, which Time Machine itself queries for sticky exclusions, for excluded items in the home folder (about 0.25 s), and removes TMSkipper's exclusions found outside the roots and the guarded paths. Spotlight does not index hidden folders or folders inside them, so this catches most copies, not all. Roots are compared in every form (as written, real path, any letter case), so an exclusion inside a root is never taken for a copy.
+- The roots and guarded paths of the last applied scan are saved in `~/Library/Application Support/TMSkipper/locations.json`. When the config stops listing one, the next scan walks it once more and removes the exclusions TMSkipper left there, and `list` and `reset` still see them; a location is forgotten only once that worked.
 
 ## D9. Guarded global paths
 
@@ -113,7 +115,7 @@ TMSkipper re-checks a short list of guarded paths at every scan and re-excludes 
 ## D10. Logging and status
 
 - Changes and errors go to the unified log (`os_log`, subsystem `io.github.manuelminelle.tmskipper`): no log file to rotate.
-- The last scan's summary is written to `~/Library/Application Support/TMSkipper/last-scan.json` and shown by `tmskipper status`.
+- The last scan's summary is written to `~/Library/Application Support/TMSkipper/last-scan.json` and shown by `tmskipper status`. `locations.json` next to it holds the roots and guarded paths of that scan (D8).
 - No notifications: a command-line binary has no app bundle, and the log plus `status` are enough.
 
 ## D11. English, open-source-ready, private until proven
@@ -140,9 +142,23 @@ Project folders are partly untrusted: they hold archives, downloads and other pe
 | A nested rule folder could pass through a symbolic link in the middle of its path (verified) | Low | Every component must be a real folder |
 | `~/.cache` was guarded by default but may hold tokens | Low | Removed from the defaults |
 
+A second review, on the fixed code, found and fixed, again each with a regression test that fails without the fix:
+
+| Finding | Severity | Fix |
+|---|---|---|
+| `cp -R`, `ditto` and `mv` copy the exclusion and the marker: a `dist` copied out as a delivery stayed excluded, invisible to `scan`, `list` and `reset` (verified) | Medium | Each scan asks Spotlight for excluded items in the home folder and removes TMSkipper's exclusions outside the roots and guarded paths; `list` and `reset` include them (D8) |
+| `GIT_DIR`, `GIT_INDEX_FILE` or `GIT_CONFIG_*` inherited from a hook or an IDE terminal pointed git at another repository, whose empty answer read as "no tracked files" (verified) | Low | git runs without the caller's `GIT_*` variables |
+| A root or guarded path removed from the config left its exclusions behind, unseen by `list` and `reset`, which the recovery steps in SECURITY.md rely on | Low | The locations of the last scan are saved and cleaned up once they leave the config (D8); a guarded marker inside a root that is no longer guarded is removed |
+| The secret check matched names with exact case, missed `*.pfx`, `*.ppk`, `*.kdbx`, `*.keychain-db`, `*.gpg` and PGP private keys, and read only 64 bytes (verified) | Low | Names matched ignoring case, more patterns, 4 KB searched for PEM, OpenSSH, PGP and PuTTY keys |
+| A named pipe as `.git/index` blocked git until its 60-second timeout for every candidate in that repository; enough of them ended the agent's scan at 15 minutes, every time (verified) | Low | A repository git cannot answer for is asked once per scan; all git checks of a scan share a 5-minute budget |
+| A folder name such as `:(attr:x)build` was read as pathspec magic, so `ls-files` missed tracked files (verified) | Low | `--literal-pathspecs` |
+| `status` printed saved scan errors, which hold untrusted file names, without replacing control characters; bidirectional overrides were never replaced | Low | Control and format characters (except the emoji joiner) become "?" everywhere |
+| Under a root reached through a symbolic link, a protected path written with the real location did not match | Low | Candidates are compared by their real location too |
+
 Accepted, documented risks:
 
-- **Top-level secret check.** Only the top level of a candidate is checked for secret names and private keys. Deeper files are covered by the tracked-files check when the project uses git.
+- **Top-level secret check.** Only the top level of a candidate is checked for secret names and private keys. The tracked-files check does not make up for it: secrets are usually git-ignored, and a repository nested deeper inside a candidate (a git dependency in Elixir's `deps`, for example) is not seen by the outer one.
+- **Copies Spotlight cannot see.** Copies of excluded folders inside hidden folders, or in places excluded from Spotlight or outside the home folder, are not found. The README tells how to copy without the exclusion.
 - **Committed after exclusion.** A folder already excluded is not checked again for git-tracked files: that would cost one git call per exclusion on every scan, right when the backup disk is mounted.
 - **Same-user attacker.** A process running as the user could swap a folder for a symbolic link between the check and the write. It could already change the user's backups directly, so this gives it nothing new.
 - **Paths in the unified log** are logged as public so that `log show` is useful; they stay on the Mac unless the user shares a system diagnostic report.

@@ -87,8 +87,25 @@ public enum FileSystem {
     }
 
     /// Shell-style wildcard match ("*", "?", "[...]") of a single name.
-    public static func matches(_ name: String, pattern: String) -> Bool {
-        fnmatch(pattern, name, 0) == 0
+    public static func matches(_ name: String, pattern: String, ignoringCase: Bool = false) -> Bool {
+        fnmatch(pattern, name, ignoringCase ? FNM_CASEFOLD : 0) == 0
+    }
+
+    /// The path with every symbolic link resolved (`realpath`), or nil if it does not exist.
+    /// Unlike `resolvingSymlinksInPath()`, it keeps `/private`, as Spotlight does.
+    public static func realPath(_ url: URL) -> String? {
+        url.withUnsafeFileSystemRepresentation { path -> String? in
+            guard let path, let resolved = realpath(path, nil) else { return nil }
+            defer { free(resolved) }
+            return String(cString: resolved)
+        }
+    }
+
+    /// True if `path` is `ancestor` or lies inside it, ignoring letter case as APFS does by default.
+    public static func path(_ path: String, isInside ancestor: String) -> Bool {
+        let path = path.lowercased()
+        let ancestor = ancestor.lowercased()
+        return path == ancestor || path.hasPrefix(ancestor == "/" ? "/" : ancestor + "/")
     }
 
     /// Approximate disk usage of a directory tree (allocated size, hard links counted once per path).

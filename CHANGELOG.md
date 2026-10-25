@@ -16,6 +16,16 @@ Security fixes from a review before the first public release:
 - Control characters in file names are replaced before printing.
 - CI runs with read-only permissions and a pinned checkout action.
 
+Fixes from a second review:
+
+- Folders copied or moved out of the roots (`cp -R`, `ditto` and `mv` carry the exclusion) are found through Spotlight and their exclusion is removed; `list` and `reset` show and remove them too.
+- Exclusions left in a root or guarded path removed from the config are removed at the next scan, and `list` and `reset` still see them (`locations.json` in the support folder).
+- git no longer inherits `GIT_DIR`, `GIT_INDEX_FILE` or other `GIT_*` variables, and never reads folder names as pathspec magic.
+- A repository git cannot answer for is asked once per scan, and all git checks of a scan share a 5-minute budget.
+- The secret check ignores letter case, knows more key and password-database files (`*.pfx`, `*.ppk`, `*.kdbx`, `*.keychain-db`, `*.gpg`, …) and finds PGP, PuTTY and JSON-embedded private keys in the first 4 KB of a file.
+- `status` replaces control characters in saved errors; bidirectional overrides are replaced in all output.
+- `protectedPaths` also match candidates under a root reached through a symbolic link.
+
 Other changes:
 
 - A dry run's summary now says "to exclude" and "to remove" instead of "excluded" and "removed".
